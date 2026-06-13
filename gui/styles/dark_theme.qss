@@ -1,0 +1,357 @@
+/* TradeBook dark theme — Phase 2 baseline.
+   Background ~#1e1e1e, text ~#e0e0e0, accent blue for selection,
+   green/red for P&L handled in the table model via ForegroundRole. */
+
+QMainWindow, QWidget {
+    background-color: #1e1e1e;
+    color: #e0e0e0;
+    font-family: "Segoe UI", "Arial", sans-serif;
+    font-size: 10pt;
+}
+
+QTabWidget::pane {
+    border: 1px solid #3c3c3c;
+    background-color: #1e1e1e;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background: #2d2d2d;
+    color: #b0b0b0;
+    padding: 8px 22px;
+    border: 1px solid #3c3c3c;
+    border-bottom: none;
+    min-width: 90px;
+}
+
+QTabBar::tab:selected {
+    background: #1e1e1e;
+    color: #ffffff;
+    border-bottom: 2px solid #00A3FF;
+}
+
+QTabBar::tab:hover:!selected {
+    background: #383838;
+    color: #e0e0e0;
+}
+
+QTableView {
+    background-color: #252525;
+    alternate-background-color: #2a2a2a;
+    color: #e0e0e0;
+    gridline-color: #3c3c3c;
+    selection-background-color: #094771;
+    selection-color: #ffffff;
+    border: 1px solid #3c3c3c;
+}
+
+QTableView::item {
+    padding: 4px 8px;
+}
+
+QHeaderView::section {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    padding: 6px 10px;
+    border: none;
+    border-right: 1px solid #3c3c3c;
+    border-bottom: 1px solid #3c3c3c;
+    font-weight: bold;
+}
+
+QHeaderView::section:hover {
+    background-color: #383838;
+}
+
+QMenu {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+    padding: 4px 0px;
+}
+
+QMenu::item {
+    padding: 6px 24px;
+}
+
+QMenu::item:selected {
+    background-color: #094771;
+    color: #ffffff;
+}
+
+QScrollBar:vertical {
+    background: #1e1e1e;
+    width: 12px;
+    border: none;
+    margin: 0px;
+}
+QScrollBar::handle:vertical {
+    background: #3c3c3c;
+    border-radius: 3px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #555555;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
+QScrollBar:horizontal {
+    background: #1e1e1e;
+    height: 12px;
+    border: none;
+    margin: 0px;
+}
+QScrollBar::handle:horizontal {
+    background: #3c3c3c;
+    border-radius: 3px;
+    min-width: 24px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #555555;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent;
+}
+
+QStatusBar {
+    background-color: #2d2d2d;
+    color: #b0b0b0;
+    border-top: 1px solid #3c3c3c;
+}
+
+QPushButton {
+    background-color: #3c3c3c;
+    color: #e0e0e0;
+    border: 1px solid #555555;
+    padding: 6px 18px;
+    border-radius: 3px;
+}
+QPushButton:hover {
+    background-color: #4a4a4a;
+}
+QPushButton:pressed {
+    background-color: #2d2d2d;
+}
+QPushButton:disabled {
+    background-color: #2a2a2a;
+    color: #606060;
+}
+
+QLineEdit, QPlainTextEdit, QTextEdit {
+    background-color: #252525;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+    padding: 4px 6px;
+    selection-background-color: #094771;
+}
+
+QLabel {
+    color: #e0e0e0;
+    background: transparent;
+}
+
+QMessageBox {
+    background-color: #2d2d2d;
+}
+QMessageBox QLabel {
+    color: #e0e0e0;
+}
+
+QToolTip {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    border: 1px solid #555555;
+}
+
+/* Dashboard stat cards (Phase 4). */
+QFrame#StatCard {
+    background-color: #252525;
+    border: 1px solid #3c3c3c;
+    border-radius: 4px;
+}
+
+QFrame#StatCard QLabel {
+    background: transparent;
+}
+
+/* Week-strip cells (Phase 13). One per day along the top of Dashboard. */
+QFrame#WeekStripCell {
+    background-color: #252525;
+    border: 1px solid #3c3c3c;
+    border-radius: 4px;
+}
+QFrame#WeekStripCell QLabel {
+    background: transparent;
+}
+
+/* Chart cards — generic container for the new visualisations. */
+QFrame#ChartCard {
+    background-color: #252525;
+    border: 1px solid #3c3c3c;
+    border-radius: 4px;
+}
+QFrame#ChartCard QLabel {
+    background: transparent;
+}
+
+/* Chart-card title bar: drag handle + minimize / size-cycle buttons.
+   Hover state on the bar itself signals "this is grabbable". */
+QWidget#ChartCardTitleBar {
+    background: transparent;
+}
+QWidget#ChartCardTitleBar QToolButton {
+    background-color: transparent;
+    color: #909090;
+    border: none;
+    padding: 0 4px;
+    font-size: 11pt;
+}
+QWidget#ChartCardTitleBar QToolButton:hover {
+    color: #ffffff;
+    background-color: #3c3c3c;
+    border-radius: 3px;
+}
+
+QDateEdit {
+    background-color: #252525;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+    padding: 4px 6px;
+    selection-background-color: #094771;
+}
+
+/* QCalendarWidget popup — the global QTableView::item padding above is
+   too generous for the calendar's tiny day grid and was causing 2-digit
+   numbers (10, 11, ...) to elide to "...". Reset the cell padding and
+   style the nav bar + weekday header to match the dark theme. */
+QCalendarWidget QTableView {
+    background-color: #252525;
+    alternate-background-color: #252525;
+    selection-background-color: #094771;
+    selection-color: #ffffff;
+}
+QCalendarWidget QAbstractItemView:enabled {
+    color: #e0e0e0;
+}
+QCalendarWidget QAbstractItemView:disabled {
+    color: #606060;
+}
+QCalendarWidget QTableView::item {
+    padding: 0;
+}
+QCalendarWidget QHeaderView::section {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    padding: 4px 2px;
+    border: none;
+    font-weight: normal;
+}
+QCalendarWidget QWidget#qt_calendar_navigationbar {
+    background-color: #2d2d2d;
+}
+QCalendarWidget QToolButton {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+    padding: 4px 10px;
+    border-radius: 3px;
+}
+QCalendarWidget QToolButton:hover {
+    background-color: #3c3c3c;
+}
+QCalendarWidget QSpinBox {
+    background-color: #252525;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+}
+
+QPushButton:checked {
+    background-color: #094771;
+    color: #ffffff;
+    border: 1px solid #00A3FF;
+}
+
+QListWidget {
+    background-color: #252525;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+    selection-background-color: #094771;
+    selection-color: #ffffff;
+}
+QListWidget::item {
+    padding: 6px 8px;
+}
+QListWidget::item:hover {
+    background-color: #2d2d2d;
+}
+
+/* ---- Reusable label classes (set via objectName) ----------------------
+   These replace one-off setStyleSheet calls scattered through the tabs
+   so palette tweaks happen in one place. */
+
+/* Center-aligned italic placeholder used for empty-state stacks. */
+QLabel#emptyState {
+    color: #606060;
+    font-size: 13pt;
+    font-style: italic;
+}
+
+/* Muted hint / subtitle text. */
+QLabel#hintLabel {
+    color: #b0b0b0;
+}
+
+/* Bold red error text (form validation, etc.). */
+QLabel#errorLabel {
+    color: #FF1744;
+}
+
+/* Bold section header used above tables / editors. */
+QLabel#sectionTitle {
+    color: #e0e0e0;
+    font-size: 13pt;
+    font-weight: bold;
+}
+
+/* Trades-tab "showing trades for…" filter banner. */
+QWidget#DateFilterBanner {
+    background-color: #094771;
+    border: 1px solid #00A3FF;
+    border-radius: 3px;
+}
+QWidget#DateFilterBanner QLabel {
+    color: #ffffff;
+    background: transparent;
+    font-weight: bold;
+}
+
+/* QToolButton baseline used by the rich-text formatting toolbar above
+   the Journal + Briefs editors. Compact, with clear "checked" state
+   so toggles (bold / italic / list) stand out. */
+QToolButton {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    border: 1px solid #3c3c3c;
+    padding: 4px 8px;
+    border-radius: 3px;
+}
+QToolButton:hover {
+    background-color: #3c3c3c;
+}
+QToolButton:pressed, QToolButton:checked {
+    background-color: #094771;
+    border: 1px solid #00A3FF;
+    color: #ffffff;
+}
+QToolButton:disabled {
+    color: #606060;
+    background-color: #252525;
+}

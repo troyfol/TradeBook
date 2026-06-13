@@ -1,0 +1,33 @@
+# ───────────────────────────── TradeBook .gitignore ─────────────────────────────
+
+# Virtual environments
+.venv/
+venv/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# ── User data — NEVER commit (real trade history, journal notes, attachments) ──
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.lock
+
+# Test fixtures contain real sample-trade data — kept local, not published
+tests/
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
