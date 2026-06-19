@@ -93,6 +93,15 @@ def _fmt_seconds(s: Optional[float]) -> str:
     return f"{d}d {h}h"
 
 
+def _fmt_ratio_value(v: float) -> str:
+    """Formatter for the risk-adjusted ratio BigValueCards. ``None`` is
+    handled by BigValueCard itself (renders an em dash); this only sees
+    real floats, so we just guard against the unbounded case."""
+    if math.isinf(v):
+        return "∞"
+    return f"{v:.2f}"
+
+
 def _report_rows_to_label_value(
     report,
     *,
@@ -310,6 +319,13 @@ class DashboardTab(QWidget):
         self.chart_pf = GaugeChart(mode=GaugeChart.MODE_PROFIT_FACTOR)
         self.chart_tags = CategoryBars(page_size=7, pct_basis="win_loss_split")
         self.chart_open_positions = OpenPositionsCard()
+        # Risk-adjusted ratio cards — single big number, sign-colored.
+        self.chart_sortino = BigValueCard(
+            formatter=_fmt_ratio_value, color_by_sign=True,
+        )
+        self.chart_gain_to_pain = BigValueCard(
+            formatter=_fmt_ratio_value, color_by_sign=True,
+        )
 
         # Map the registry keys to ChartCard widgets. Each card knows
         # its own key (used in drag-and-drop swap and persistence).
@@ -331,6 +347,8 @@ class DashboardTab(QWidget):
             "equity_curve": self.equity_curve,
             "daily_pnl": self.daily_bars,
             "open_positions": self.chart_open_positions,
+            "adjusted_sortino": self.chart_sortino,
+            "gain_to_pain": self.chart_gain_to_pain,
         }
         self._chart_cards_by_key: dict[str, ChartCard] = {}
         for key, inner in inner_for.items():
@@ -1111,3 +1129,8 @@ class DashboardTab(QWidget):
         except Exception:
             tag_rows = []
         self.chart_tags.set_rows(tag_rows)
+
+        # Risk-adjusted ratio cards. None (no closed trades) → em dash;
+        # math.inf (upside, zero downside) → ∞ via the formatter.
+        self.chart_sortino.set_value(metrics.adjusted_sortino)
+        self.chart_gain_to_pain.set_value(metrics.gain_to_pain)

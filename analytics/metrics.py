@@ -35,6 +35,13 @@ class TradeMetrics:
     # corresponding bucket has no trades.
     avg_hold_seconds_winners: Optional[float] = None
     avg_hold_seconds_losers: Optional[float] = None
+    # Risk-adjusted ratios (optional stat cards / charts). Both are
+    # None when there are no closed trades, and may be math.inf when
+    # there is upside but zero downside (mirrors profit_factor's
+    # convention). Computed over per-trade net P&L with a target /
+    # minimum acceptable return (MAR) of 0.
+    adjusted_sortino: Optional[float] = None  # Sortino / sqrt(2) (Pezier)
+    gain_to_pain: Optional[float] = None      # Schwager gain-to-pain
 
 
 def compute_metrics(trades: Iterable[dict]) -> TradeMetrics:
@@ -75,6 +82,31 @@ def compute_metrics(trades: Iterable[dict]) -> TradeMetrics:
 
     largest_winner = max(winners) if winners else 0.0
     largest_loser = min(losers) if losers else 0.0
+
+    # --- risk-adjusted ratios -------------------------------------------
+    # Adjusted Sortino (per-trade, MAR=0): mean return / downside
+    # deviation, divided by sqrt(2) so it's directly comparable to a
+    # Sharpe ratio (Pezier adjustment). Downside deviation is the target
+    # semideviation — ALL trades go in the denominator, but only those
+    # below the target (here, losers) contribute to the numerator.
+    downside_sq = sum(p * p for p in losers)  # losers are the only p < 0
+    downside_dev = math.sqrt(downside_sq / n)
+    if downside_dev > 0:
+        adjusted_sortino = (expectancy / downside_dev) / math.sqrt(2.0)
+    elif expectancy > 0:
+        adjusted_sortino = math.inf
+    else:
+        adjusted_sortino = 0.0
+
+    # Gain-to-Pain (Schwager): sum of all net P&L / sum of |losing P&L|.
+    # Can be negative when the period was a net loser despite some
+    # losing trades; inf when there were no losing trades at all.
+    if total_losses > 0:
+        gain_to_pain = total_pnl / total_losses
+    elif total_pnl > 0:
+        gain_to_pain = math.inf
+    else:
+        gain_to_pain = 0.0
 
     # Hold-time metrics (skip trades without a hold_duration_seconds value).
     holds = [
@@ -124,6 +156,8 @@ def compute_metrics(trades: Iterable[dict]) -> TradeMetrics:
         most_profitable_hold_seconds=most_profitable_hold_seconds,
         avg_hold_seconds_winners=avg_hold_seconds_winners,
         avg_hold_seconds_losers=avg_hold_seconds_losers,
+        adjusted_sortino=adjusted_sortino,
+        gain_to_pain=gain_to_pain,
     )
 
 
@@ -218,6 +252,25 @@ def _color_pnl(v: float) -> Optional[str]:
     return None
 
 
+def _fmt_ratio(v: Optional[float]) -> str:
+    """Render a unit-less ratio (Sortino, gain-to-pain) as `1.23`,
+    `∞` for an unbounded value, or `—` when there's no data."""
+    if v is None:
+        return "—"
+    if math.isinf(v):
+        return "∞"
+    return f"{v:.2f}"
+
+
+def _color_ratio(v: Optional[float]) -> Optional[str]:
+    """Green when positive (incl. ∞), red when negative, neutral at 0."""
+    if v is None:
+        return None
+    if math.isinf(v):
+        return "#00C853"
+    return _color_pnl(v)
+
+
 def _fmt_hold(seconds: Optional[float]) -> str:
     """Render a hold duration as `47s` / `12m 30s` / `2h 14m`."""
     if seconds is None:
@@ -291,6 +344,19 @@ METRIC_REGISTRY: list[MetricDef] = [
     MetricDef(
         "most_profitable_hold", "Most Profitable Hold",
         lambda m: _fmt_hold(m.most_profitable_hold_seconds),
+    ),
+    # Risk-adjusted ratios — opt-in (not in DEFAULT_METRIC_ORDER, so they
+    # don't auto-fill the clean 4×3 grid; users enable them via the
+    # ⚙ Stat Cards dialog).
+    MetricDef(
+        "adjusted_sortino", "Adj. Sortino Ratio",
+        lambda m: _fmt_ratio(m.adjusted_sortino),
+        lambda m: _color_ratio(m.adjusted_sortino),
+    ),
+    MetricDef(
+        "gain_to_pain", "Gain-to-Pain Ratio",
+        lambda m: _fmt_ratio(m.gain_to_pain),
+        lambda m: _color_ratio(m.gain_to_pain),
     ),
 ]
 

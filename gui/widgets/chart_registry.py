@@ -90,6 +90,17 @@ CHART_CARDS: list[ChartCardDef] = [
         "per-symbol breakdown. Independent of the date filter.",
         default_size="tall",
     ),
+    ChartCardDef(
+        "adjusted_sortino", "Adjusted Sortino Ratio",
+        "Risk-adjusted return using downside deviation only (target / "
+        "MAR = 0), scaled by 1/√2 for direct comparison to a Sharpe "
+        "ratio. Higher is better.",
+    ),
+    ChartCardDef(
+        "gain_to_pain", "Gain-to-Pain Ratio",
+        "Sum of all net P&L divided by the total of losing P&L "
+        "(Schwager). Higher is better.",
+    ),
 ]
 
 DEFAULT_CHART_ORDER: list[str] = [c.key for c in CHART_CARDS]
