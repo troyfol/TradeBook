@@ -94,6 +94,11 @@ BRIEFS_THUMB_SIZE_INDEX = "briefs/thumb_size_index"
 # Strategies can be styled independently, mirroring the size index.
 BRIEFS_THUMB_BORDER_COLOR = "briefs/thumb_border_color"
 BRIEFS_THUMB_BORDER_WIDTH = "briefs/thumb_border_width"
+# Pinned-image overlay border: the highlight the editor paints around
+# document images that are pinned as thumbnails. Color hex + width px
+# (0 = hidden). Per-tab, same rationale as the tile border above.
+BRIEFS_PINNED_OVERLAY_COLOR = "briefs/pinned_overlay_color"
+BRIEFS_PINNED_OVERLAY_WIDTH = "briefs/pinned_overlay_width"
 
 
 # ---- Strategies ------------------------------------------------------------
@@ -112,6 +117,9 @@ STRATEGIES_THUMB_SIZE_INDEX = "strategies/thumb_size_index"
 # See the Briefs equivalents above.
 STRATEGIES_THUMB_BORDER_COLOR = "strategies/thumb_border_color"
 STRATEGIES_THUMB_BORDER_WIDTH = "strategies/thumb_border_width"
+# Pinned-image overlay border (see Briefs equivalents above).
+STRATEGIES_PINNED_OVERLAY_COLOR = "strategies/pinned_overlay_color"
+STRATEGIES_PINNED_OVERLAY_WIDTH = "strategies/pinned_overlay_width"
 
 
 # ---- Rich-text editor defaults --------------------------------------------

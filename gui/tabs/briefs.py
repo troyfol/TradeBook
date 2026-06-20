@@ -50,13 +50,17 @@ from gui.settings_keys import (
     BRIEFS_LAST_ID as SETTINGS_LAST_ID,
     BRIEFS_SHOW_OUTLINE as SETTINGS_SHOW_OUTLINE,
     BRIEFS_SHOW_THUMBS as SETTINGS_SHOW_THUMBS,
+    BRIEFS_PINNED_OVERLAY_COLOR as SETTINGS_PINNED_OVERLAY_COLOR,
+    BRIEFS_PINNED_OVERLAY_WIDTH as SETTINGS_PINNED_OVERLAY_WIDTH,
     BRIEFS_SPLITTER as SETTINGS_SPLITTER,
     BRIEFS_THUMB_BORDER_COLOR as SETTINGS_THUMB_BORDER_COLOR,
     BRIEFS_THUMB_BORDER_WIDTH as SETTINGS_THUMB_BORDER_WIDTH,
     BRIEFS_THUMB_SIZE_INDEX as SETTINGS_THUMB_SIZE_INDEX,
 )
 from gui.widgets.find_bar import FindBar
-from gui.widgets.journal_editor import JournalEditor
+from gui.widgets.journal_editor import (
+    DEFAULT_PINNED_OVERLAY_COLOR, DEFAULT_PINNED_OVERLAY_WIDTH, JournalEditor,
+)
 from gui.widgets.rich_text_toolbar import RichTextToolbar
 from gui.widgets.strategy_navigator import (
     DEFAULT_THUMB_BORDER_COLOR, DEFAULT_THUMB_BORDER_WIDTH,
@@ -393,6 +397,9 @@ class BriefsTab(QWidget):
         )
         self.thumb_strip.size_changed.connect(self._on_thumb_size_changed)
         self.thumb_strip.border_changed.connect(self._on_thumb_border_changed)
+        self.thumb_strip.overlay_border_changed.connect(
+            self._on_overlay_border_changed,
+        )
         # Thumbnail-tag plumbing (chip rail toggles + per-thumb
         # right-click submenu). Add/manage requests bubble up here
         # because the strip is DB-agnostic by design.
@@ -1001,6 +1008,14 @@ class BriefsTab(QWidget):
         self._settings.setValue(SETTINGS_THUMB_BORDER_COLOR, str(color_hex))
         self._settings.setValue(SETTINGS_THUMB_BORDER_WIDTH, int(width))
 
+    def _on_overlay_border_changed(self, color_hex: str, width: int) -> None:
+        # Apply to the editor's pinned-image overlay live, then persist.
+        self.editor.set_pinned_overlay_style(str(color_hex), int(width))
+        if self._settings is None:
+            return
+        self._settings.setValue(SETTINGS_PINNED_OVERLAY_COLOR, str(color_hex))
+        self._settings.setValue(SETTINGS_PINNED_OVERLAY_WIDTH, int(width))
+
     # ---- collapse / expand --------------------------------------------
 
     def _on_collapse_all(self) -> None:
@@ -1084,6 +1099,21 @@ class BriefsTab(QWidget):
         except (TypeError, ValueError):
             border_w = DEFAULT_THUMB_BORDER_WIDTH
         self.thumb_strip.set_border_style(str(border_color), border_w)
+
+        # Pinned-image overlay border — apply to the editor and seed the
+        # strip's Border… dialog. The strip/editor validate + clamp.
+        overlay_color = self._settings.value(
+            SETTINGS_PINNED_OVERLAY_COLOR, DEFAULT_PINNED_OVERLAY_COLOR,
+        )
+        raw_ov = self._settings.value(
+            SETTINGS_PINNED_OVERLAY_WIDTH, DEFAULT_PINNED_OVERLAY_WIDTH,
+        )
+        try:
+            overlay_w = int(raw_ov)
+        except (TypeError, ValueError):
+            overlay_w = DEFAULT_PINNED_OVERLAY_WIDTH
+        self.editor.set_pinned_overlay_style(str(overlay_color), overlay_w)
+        self.thumb_strip.set_overlay_border_style(str(overlay_color), overlay_w)
 
     @staticmethod
     def _coerce_bool(v, *, default: bool) -> bool:

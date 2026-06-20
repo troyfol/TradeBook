@@ -45,6 +45,14 @@ MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 # QUrl scheme used to reference DB-stored attachments inside the document.
 ATTACHMENT_SCHEME = "attachment"
 
+# Default look of the overlay border the editor paints around images that
+# are pinned as thumbnails (a pure UI affordance — the image bytes are
+# untouched). Color is a hex string; width is in screen pixels. The host
+# tab can override these per-tab via ``set_pinned_overlay_style``.
+DEFAULT_PINNED_OVERLAY_COLOR = "#FFD700"  # gold — visible on dark + light
+DEFAULT_PINNED_OVERLAY_WIDTH = 3
+MAX_PINNED_OVERLAY_WIDTH = 8
+
 
 def make_attachment_url(att_id: int) -> QUrl:
     return QUrl(f"{ATTACHMENT_SCHEME}:{int(att_id)}")
@@ -136,6 +144,10 @@ class JournalEditor(QTextEdit):
         # Journal tab (no thumbnail strip) leaves this empty and pays
         # no paint cost.
         self._thumbnail_ids: set[int] = set()
+        # Color + width of that pinned-image overlay border. Defaults to
+        # gold/3px; host tabs override per-tab via set_pinned_overlay_style.
+        self._pinned_overlay_color: str = DEFAULT_PINNED_OVERLAY_COLOR
+        self._pinned_overlay_width: int = DEFAULT_PINNED_OVERLAY_WIDTH
         # Apply persistent defaults on first construction so an empty
         # editor starts at the user's preferred size / weight / color.
         editor_defaults.apply_to_editor(
@@ -482,14 +494,43 @@ class JournalEditor(QTextEdit):
         self._thumbnail_ids = new_ids
         self.viewport().update()
 
+    def set_pinned_overlay_style(self, color_hex: str, width: int) -> None:
+        """Set the color + thickness of the pinned-image overlay border.
+
+        ``width`` 0 hides the overlay entirely. Validates the color and
+        clamps the width, then repaints. The host tab calls this on
+        settings restore and after the user edits the style.
+        """
+        color = QColor(color_hex)
+        color_str = (
+            color.name() if color.isValid() else self._pinned_overlay_color
+        )
+        try:
+            w = int(width)
+        except (TypeError, ValueError):
+            w = self._pinned_overlay_width
+        w = max(0, min(w, MAX_PINNED_OVERLAY_WIDTH))
+        if (
+            color_str == self._pinned_overlay_color
+            and w == self._pinned_overlay_width
+        ):
+            return
+        self._pinned_overlay_color = color_str
+        self._pinned_overlay_width = w
+        self.viewport().update()
+
+    def pinned_overlay_style(self) -> tuple[str, int]:
+        """Current (hex color, width) of the pinned-image overlay."""
+        return self._pinned_overlay_color, self._pinned_overlay_width
+
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
         super().paintEvent(event)
-        if not self._thumbnail_ids:
+        if not self._thumbnail_ids or self._pinned_overlay_width <= 0:
             return
         painter = QPainter(self.viewport())
         try:
-            pen = QPen(QColor("#FFD700"))  # gold — visible on dark + light bg
-            pen.setWidth(3)
+            pen = QPen(QColor(self._pinned_overlay_color))
+            pen.setWidth(self._pinned_overlay_width)
             pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)

@@ -27,13 +27,16 @@ from PySide6.QtGui import (
     QColor, QImage, QPixmap, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (
-    QColorDialog, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea,
+    QColorDialog, QDialog, QDialogButtonBox, QFrame, QGroupBox, QHBoxLayout,
+    QLabel, QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea,
     QSizePolicy, QSlider, QSpinBox, QToolButton, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
-from gui.widgets.journal_editor import parse_attachment_url
+from gui.widgets.journal_editor import (
+    DEFAULT_PINNED_OVERLAY_COLOR, DEFAULT_PINNED_OVERLAY_WIDTH,
+    MAX_PINNED_OVERLAY_WIDTH, parse_attachment_url,
+)
 from gui.widgets.thumbnail_tag_menu import (
     ThumbTag, build_thumbnail_tag_submenu,
 )
@@ -167,6 +170,11 @@ class ImageThumbStrip(QFrame):
     thumb_remove_requested = Signal(int)  # attachment id
     size_changed = Signal(int)  # index into THUMB_SIZES
     border_changed = Signal(str, int)  # (hex color, width px) — host persists
+    # Pinned-image overlay border (the highlight the EDITOR paints around
+    # images that are pinned as thumbnails). The strip doesn't render this
+    # itself — it just edits the values and emits; the host applies them to
+    # the editor and persists. (hex color, width px)
+    overlay_border_changed = Signal(str, int)
     # Emitted whenever the host tab should rebuild the strip — fires on
     # filter chip toggles. Hosts that need to re-query the DB on filter
     # change can listen; the strip already re-renders on its own.
@@ -191,6 +199,11 @@ class ImageThumbStrip(QFrame):
         # persisted by the host tab (same pattern as the size index).
         self._border_color: str = DEFAULT_THUMB_BORDER_COLOR
         self._border_width: int = DEFAULT_THUMB_BORDER_WIDTH
+        # Pinned-image overlay border values — carried here only so the
+        # Border… dialog can edit them in one place; rendering happens in
+        # the editor (see overlay_border_changed).
+        self._overlay_color: str = DEFAULT_PINNED_OVERLAY_COLOR
+        self._overlay_width: int = DEFAULT_PINNED_OVERLAY_WIDTH
         # Guard against the slider's valueChanged firing while we're
         # programmatically syncing it from the host tab.
         self._suspend_size_signal = False
@@ -552,21 +565,41 @@ class ImageThumbStrip(QFrame):
         self._apply_height_from_size()
         self.refresh()
 
+    def set_overlay_border_style(self, color_hex: str, width: int) -> None:
+        """Store the pinned-image overlay border values (host restore
+        path). The strip doesn't render the overlay — these values just
+        seed the Border… dialog. Validates/clamps; emits nothing."""
+        color = QColor(color_hex)
+        color_str = color.name() if color.isValid() else self._overlay_color
+        try:
+            w = int(width)
+        except (TypeError, ValueError):
+            w = self._overlay_width
+        self._overlay_color = color_str
+        self._overlay_width = max(0, min(w, MAX_PINNED_OVERLAY_WIDTH))
+
     def _open_border_dialog(self) -> None:
-        """Open the border editor; apply + emit on accept."""
+        """Open the combined border editor (thumbnail tile + pinned-image
+        overlay); apply + emit each section that changed on accept."""
         dlg = _ThumbnailBorderDialog(
-            self._border_color, self._border_width, self,
+            self._border_color, self._border_width,
+            self._overlay_color, self._overlay_width, self,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        color_str, w = dlg.result_values()
-        if color_str == self._border_color and w == self._border_width:
-            return
-        self._border_color = color_str
-        self._border_width = w
-        self._apply_height_from_size()
-        self.refresh()
-        self.border_changed.emit(color_str, w)
+        color_str, w, ov_color, ov_w = dlg.result_values()
+        # Thumbnail tile border — applied + rendered by the strip itself.
+        if color_str != self._border_color or w != self._border_width:
+            self._border_color = color_str
+            self._border_width = w
+            self._apply_height_from_size()
+            self.refresh()
+            self.border_changed.emit(color_str, w)
+        # Pinned-image overlay — rendered by the editor via the host.
+        if ov_color != self._overlay_color or ov_w != self._overlay_width:
+            self._overlay_color = ov_color
+            self._overlay_width = ov_w
+            self.overlay_border_changed.emit(ov_color, ov_w)
 
     # ---- rendering -------------------------------------------------------
 
@@ -741,23 +774,22 @@ class ImageThumbStrip(QFrame):
 # ---- helper: thumbnail border editor dialog ------------------------------
 
 
-class _ThumbnailBorderDialog(QDialog):
-    """Small modal editor for the thumbnail border color + width.
+class _BorderSection(QGroupBox):
+    """One labeled color + thickness editor with a live preview.
 
-    Shows a live preview swatch that updates as the user picks a color
-    or changes the width spin box. ``result_values()`` returns the
-    chosen ``(hex_color, width)`` after the dialog is accepted.
+    Reused for both the thumbnail-tile border and the pinned-image
+    overlay border. ``values()`` returns the chosen ``(hex_color, width)``.
     """
 
-    def __init__(self, color_hex: str, width: int, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Thumbnail Border")
-        self.setModal(True)
-
+    def __init__(
+        self, title: str, color_hex: str, width: int, max_width: int,
+        fallback_color: str, parent=None,
+    ):
+        super().__init__(title, parent)
+        self._max_width = max_width
         c = QColor(color_hex)
-        self._color: str = c.name() if c.isValid() else DEFAULT_THUMB_BORDER_COLOR
+        self._color: str = c.name() if c.isValid() else fallback_color
 
-        # Color row — a swatch button opens the standard color picker.
         color_label = QLabel("Color:", self)
         self._swatch = QPushButton(self)
         self._swatch.setFixedSize(48, 24)
@@ -768,11 +800,10 @@ class _ThumbnailBorderDialog(QDialog):
         color_row.addWidget(self._swatch)
         color_row.addStretch()
 
-        # Width row — 0 means "no border".
         width_label = QLabel("Thickness (px):", self)
         self._width_spin = QSpinBox(self)
-        self._width_spin.setRange(0, MAX_THUMB_BORDER_WIDTH)
-        self._width_spin.setValue(max(0, min(int(width), MAX_THUMB_BORDER_WIDTH)))
+        self._width_spin.setRange(0, max_width)
+        self._width_spin.setValue(max(0, min(int(width), max_width)))
         self._width_spin.setToolTip("0 = no border")
         self._width_spin.valueChanged.connect(self._update_preview)
         width_row = QHBoxLayout()
@@ -780,14 +811,75 @@ class _ThumbnailBorderDialog(QDialog):
         width_row.addWidget(self._width_spin)
         width_row.addStretch()
 
-        # Live preview box.
         self._preview = QLabel(self)
-        self._preview.setFixedSize(120, 60)
+        self._preview.setFixedSize(120, 48)
         self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview_row = QHBoxLayout()
         preview_row.addWidget(QLabel("Preview:", self))
         preview_row.addWidget(self._preview)
         preview_row.addStretch()
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(color_row)
+        layout.addLayout(width_row)
+        layout.addLayout(preview_row)
+
+        self._update_preview()
+
+    def _pick_color(self) -> None:
+        chosen = QColorDialog.getColor(
+            QColor(self._color), self, "Border Color",
+        )
+        if chosen.isValid():
+            self._color = chosen.name()
+            self._update_preview()
+
+    def _update_preview(self) -> None:
+        w = self._width_spin.value()
+        border = "none" if w <= 0 else f"{w}px solid {self._color}"
+        self._swatch.setStyleSheet(
+            f"background: {self._color}; border: 1px solid #888;"
+        )
+        self._preview.setStyleSheet(
+            f"background: #1e1e1e; border: {border};"
+        )
+
+    def values(self) -> tuple[str, int]:
+        return self._color, int(self._width_spin.value())
+
+
+class _ThumbnailBorderDialog(QDialog):
+    """Modal editor for both thumbnail-related borders:
+
+    * the **thumbnail tile** outline drawn around each strip thumbnail, and
+    * the **pinned-image overlay** the editor paints around document
+      images that are pinned as thumbnails.
+
+    ``result_values()`` returns
+    ``(tile_color, tile_width, overlay_color, overlay_width)``.
+    """
+
+    def __init__(
+        self,
+        tile_color: str,
+        tile_width: int,
+        overlay_color: str,
+        overlay_width: int,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Thumbnail Borders")
+        self.setModal(True)
+
+        self._tile = _BorderSection(
+            "Thumbnail tile border", tile_color, tile_width,
+            MAX_THUMB_BORDER_WIDTH, DEFAULT_THUMB_BORDER_COLOR, self,
+        )
+        self._overlay = _BorderSection(
+            "Pinned-image highlight (in the editor)",
+            overlay_color, overlay_width,
+            MAX_PINNED_OVERLAY_WIDTH, DEFAULT_PINNED_OVERLAY_COLOR, self,
+        )
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -798,36 +890,14 @@ class _ThumbnailBorderDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(color_row)
-        layout.addLayout(width_row)
-        layout.addLayout(preview_row)
+        layout.addWidget(self._tile)
+        layout.addWidget(self._overlay)
         layout.addWidget(buttons)
 
-        self._update_preview()
-
-    def _pick_color(self) -> None:
-        chosen = QColorDialog.getColor(
-            QColor(self._color), self, "Thumbnail Border Color",
-        )
-        if chosen.isValid():
-            self._color = chosen.name()
-            self._update_preview()
-
-    def _update_preview(self) -> None:
-        w = self._width_spin.value()
-        border = (
-            "none" if w <= 0 else f"{w}px solid {self._color}"
-        )
-        # Swatch reflects the chosen color regardless of width.
-        self._swatch.setStyleSheet(
-            f"background: {self._color}; border: 1px solid #888;"
-        )
-        self._preview.setStyleSheet(
-            f"background: #1e1e1e; border: {border};"
-        )
-
-    def result_values(self) -> tuple[str, int]:
-        return self._color, int(self._width_spin.value())
+    def result_values(self) -> tuple[str, int, str, int]:
+        tile_color, tile_w = self._tile.values()
+        ov_color, ov_w = self._overlay.values()
+        return tile_color, tile_w, ov_color, ov_w
 
 
 # ---- helper: scroll an editor to a given block ---------------------------
