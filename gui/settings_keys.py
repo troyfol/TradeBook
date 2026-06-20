@@ -89,6 +89,11 @@ BRIEFS_SHOW_THUMBS = "briefs/show_thumbs"
 # selected thumbnail size. Persisted independently from the Strategies
 # tab so the two surfaces can be tuned separately.
 BRIEFS_THUMB_SIZE_INDEX = "briefs/thumb_size_index"
+# Thumbnail border outline: hex color string (e.g. "#444444") and an
+# integer pixel width (0 = no border). Persisted per-tab so Briefs and
+# Strategies can be styled independently, mirroring the size index.
+BRIEFS_THUMB_BORDER_COLOR = "briefs/thumb_border_color"
+BRIEFS_THUMB_BORDER_WIDTH = "briefs/thumb_border_width"
 
 
 # ---- Strategies ------------------------------------------------------------
@@ -103,6 +108,10 @@ STRATEGIES_FOLDED_BLOCKS = "strategies/folded_blocks"
 # Index into ``strategy_navigator.THUMB_SIZES`` for the currently
 # selected thumbnail size on the Strategies tab.
 STRATEGIES_THUMB_SIZE_INDEX = "strategies/thumb_size_index"
+# Thumbnail border outline color (hex string) + width (px, 0 = none).
+# See the Briefs equivalents above.
+STRATEGIES_THUMB_BORDER_COLOR = "strategies/thumb_border_color"
+STRATEGIES_THUMB_BORDER_WIDTH = "strategies/thumb_border_width"
 
 
 # ---- Rich-text editor defaults --------------------------------------------

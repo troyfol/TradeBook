@@ -24,11 +24,12 @@ from typing import Callable, Optional, Sequence
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
-    QImage, QPixmap, QTextCursor, QTextDocument,
+    QColor, QImage, QPixmap, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu,
-    QScrollArea, QSizePolicy, QSlider, QToolButton, QTextEdit,
+    QColorDialog, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea,
+    QSizePolicy, QSlider, QSpinBox, QToolButton, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
@@ -136,6 +137,14 @@ THUMB_SIZES: list[QSize] = [
 ]
 DEFAULT_THUMB_SIZE_INDEX = 1  # 96×72 — matches the pre-refactor look.
 
+# Thumbnail border outline defaults. Color is a hex string; width is in
+# screen pixels (0 = no border). These reproduce the original hardcoded
+# look (1px #444). The hover accent is fixed and not user-configurable.
+DEFAULT_THUMB_BORDER_COLOR = "#444444"
+DEFAULT_THUMB_BORDER_WIDTH = 1
+MAX_THUMB_BORDER_WIDTH = 8
+THUMB_HOVER_COLOR = "#00A3FF"
+
 
 class ImageThumbStrip(QFrame):
     """Horizontal strip of thumbnails for opt-in document images.
@@ -157,6 +166,7 @@ class ImageThumbStrip(QFrame):
     image_clicked = Signal(int)  # block number containing the image
     thumb_remove_requested = Signal(int)  # attachment id
     size_changed = Signal(int)  # index into THUMB_SIZES
+    border_changed = Signal(str, int)  # (hex color, width px) — host persists
     # Emitted whenever the host tab should rebuild the strip — fires on
     # filter chip toggles. Hosts that need to re-query the DB on filter
     # change can listen; the strip already re-renders on its own.
@@ -177,6 +187,10 @@ class ImageThumbStrip(QFrame):
         self._cache: dict[int, QPixmap] = {}
         self._allowed_ids: set[int] = set()
         self._size_index: int = DEFAULT_THUMB_SIZE_INDEX
+        # Thumbnail border outline — user-configurable color + width,
+        # persisted by the host tab (same pattern as the size index).
+        self._border_color: str = DEFAULT_THUMB_BORDER_COLOR
+        self._border_width: int = DEFAULT_THUMB_BORDER_WIDTH
         # Guard against the slider's valueChanged firing while we're
         # programmatically syncing it from the host tab.
         self._suspend_size_signal = False
@@ -209,11 +223,26 @@ class ImageThumbStrip(QFrame):
         self.size_slider.setValue(self._size_index)
         self.size_slider.valueChanged.connect(self._on_slider_changed)
 
+        # Border styling — opens a small dialog to pick the thumbnail
+        # outline color + thickness.
+        self.btn_border = QToolButton(self)
+        self.btn_border.setText("Border…")
+        self.btn_border.setToolTip(
+            "Set the outline color and thickness of the thumbnails"
+        )
+        self.btn_border.setStyleSheet(
+            "QToolButton { color: #909090; font-size: 9pt;"
+            " border: none; padding: 0 2px; }"
+            "QToolButton:hover { color: #00A3FF; }"
+        )
+        self.btn_border.clicked.connect(self._open_border_dialog)
+
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
         title_row.addWidget(title)
         title_row.addStretch()
+        title_row.addWidget(self.btn_border)
         title_row.addWidget(size_label)
         title_row.addWidget(self.size_slider)
 
@@ -481,8 +510,63 @@ class ImageThumbStrip(QFrame):
         clipping when the user slides to a larger preset."""
         cur = self._current_size()
         # title row (~22px) + chip rail (~28px) + padding + thumb +
-        # scrollbar headroom.
-        self.setFixedHeight(cur.height() + 72)
+        # border margin + scrollbar headroom.
+        self.setFixedHeight(cur.height() + 72 + 2 * max(self._border_width, 1))
+
+    # ---- border styling --------------------------------------------------
+
+    def _thumb_button_style(self) -> str:
+        """Stylesheet for a single thumbnail button using the current
+        border color + width. Width 0 → no border; hover always shows
+        at least a 1px accent so the target stays discoverable."""
+        w = self._border_width
+        if w <= 0:
+            base = "QToolButton { background: transparent; border: none; }"
+        else:
+            base = (
+                "QToolButton { background: transparent;"
+                f" border: {w}px solid {self._border_color}; }}"
+            )
+        return (
+            base
+            + "QToolButton:hover {"
+            f" border: {max(w, 1)}px solid {THUMB_HOVER_COLOR}; }}"
+        )
+
+    def set_border_style(self, color_hex: str, width: int) -> None:
+        """Programmatically set the thumbnail border (host tab uses this
+        during settings restore). Clamps width to a sane range and
+        validates the color, then re-renders. Does NOT emit
+        ``border_changed`` so restore doesn't echo back to the store."""
+        color = QColor(color_hex)
+        color_str = color.name() if color.isValid() else self._border_color
+        try:
+            w = int(width)
+        except (TypeError, ValueError):
+            w = self._border_width
+        w = max(0, min(w, MAX_THUMB_BORDER_WIDTH))
+        if color_str == self._border_color and w == self._border_width:
+            return
+        self._border_color = color_str
+        self._border_width = w
+        self._apply_height_from_size()
+        self.refresh()
+
+    def _open_border_dialog(self) -> None:
+        """Open the border editor; apply + emit on accept."""
+        dlg = _ThumbnailBorderDialog(
+            self._border_color, self._border_width, self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        color_str, w = dlg.result_values()
+        if color_str == self._border_color and w == self._border_width:
+            return
+        self._border_color = color_str
+        self._border_width = w
+        self._apply_height_from_size()
+        self.refresh()
+        self.border_changed.emit(color_str, w)
 
     # ---- rendering -------------------------------------------------------
 
@@ -603,7 +687,10 @@ class ImageThumbStrip(QFrame):
         btn = QToolButton(self._row_host)
         btn.setIcon(pix)
         btn.setIconSize(size)
-        btn.setFixedSize(size.width() + 4, size.height() + 4)
+        # Reserve room for the border so a thicker outline doesn't eat
+        # into the icon area (the border draws inside the widget rect).
+        m = 2 * max(self._border_width, 1) + 2
+        btn.setFixedSize(size.width() + m, size.height() + m)
         btn.setToolTip(
             f"Click: jump to image (paragraph {block_no + 1})\n"
             f"Right-click: remove from thumbnails"
@@ -611,10 +698,7 @@ class ImageThumbStrip(QFrame):
         btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed,
         )
-        btn.setStyleSheet(
-            "QToolButton { background: transparent; border: 1px solid #444; }"
-            "QToolButton:hover { border: 1px solid #00A3FF; }"
-        )
+        btn.setStyleSheet(self._thumb_button_style())
         btn.clicked.connect(
             lambda _checked=False, b=block_no: self.image_clicked.emit(b)
         )
@@ -652,6 +736,98 @@ class ImageThumbStrip(QFrame):
         """Drop all cached thumbnails — call when the editor swaps to
         a different document so stale pixmaps don't leak across."""
         self._cache.clear()
+
+
+# ---- helper: thumbnail border editor dialog ------------------------------
+
+
+class _ThumbnailBorderDialog(QDialog):
+    """Small modal editor for the thumbnail border color + width.
+
+    Shows a live preview swatch that updates as the user picks a color
+    or changes the width spin box. ``result_values()`` returns the
+    chosen ``(hex_color, width)`` after the dialog is accepted.
+    """
+
+    def __init__(self, color_hex: str, width: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Thumbnail Border")
+        self.setModal(True)
+
+        c = QColor(color_hex)
+        self._color: str = c.name() if c.isValid() else DEFAULT_THUMB_BORDER_COLOR
+
+        # Color row — a swatch button opens the standard color picker.
+        color_label = QLabel("Color:", self)
+        self._swatch = QPushButton(self)
+        self._swatch.setFixedSize(48, 24)
+        self._swatch.setToolTip("Click to choose the outline color")
+        self._swatch.clicked.connect(self._pick_color)
+        color_row = QHBoxLayout()
+        color_row.addWidget(color_label)
+        color_row.addWidget(self._swatch)
+        color_row.addStretch()
+
+        # Width row — 0 means "no border".
+        width_label = QLabel("Thickness (px):", self)
+        self._width_spin = QSpinBox(self)
+        self._width_spin.setRange(0, MAX_THUMB_BORDER_WIDTH)
+        self._width_spin.setValue(max(0, min(int(width), MAX_THUMB_BORDER_WIDTH)))
+        self._width_spin.setToolTip("0 = no border")
+        self._width_spin.valueChanged.connect(self._update_preview)
+        width_row = QHBoxLayout()
+        width_row.addWidget(width_label)
+        width_row.addWidget(self._width_spin)
+        width_row.addStretch()
+
+        # Live preview box.
+        self._preview = QLabel(self)
+        self._preview.setFixedSize(120, 60)
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(QLabel("Preview:", self))
+        preview_row.addWidget(self._preview)
+        preview_row.addStretch()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(color_row)
+        layout.addLayout(width_row)
+        layout.addLayout(preview_row)
+        layout.addWidget(buttons)
+
+        self._update_preview()
+
+    def _pick_color(self) -> None:
+        chosen = QColorDialog.getColor(
+            QColor(self._color), self, "Thumbnail Border Color",
+        )
+        if chosen.isValid():
+            self._color = chosen.name()
+            self._update_preview()
+
+    def _update_preview(self) -> None:
+        w = self._width_spin.value()
+        border = (
+            "none" if w <= 0 else f"{w}px solid {self._color}"
+        )
+        # Swatch reflects the chosen color regardless of width.
+        self._swatch.setStyleSheet(
+            f"background: {self._color}; border: 1px solid #888;"
+        )
+        self._preview.setStyleSheet(
+            f"background: #1e1e1e; border: {border};"
+        )
+
+    def result_values(self) -> tuple[str, int]:
+        return self._color, int(self._width_spin.value())
 
 
 # ---- helper: scroll an editor to a given block ---------------------------

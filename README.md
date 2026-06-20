@@ -80,7 +80,7 @@ A workspace for consolidated trading documents — auto-generated digests or fre
 - **Auto-titling**: generated titles follow `{date_or_range}_{tags_and_tickers_alpha}` — e.g. `2026-04-01_to_2026-04-11_Breakout_EP_Earnings_AAPL_MSFT` — and can be overridden at generation time
 - **Full rich-text editor**: same JournalEditor as the Journal tab — image paste/drop, Ctrl+wheel scaling, right-click annotate, Draw button
 - **Outline pane**: clickable list of every H1/H2/H3 heading on the right of the editor — click to scroll. Toggleable from the toolbar
-- **Opt-in thumbnail strip**: a curated row of screenshots below the editor — *not* every embedded image automatically. Right-click any image in the editor → **Add to thumbnails** to pin it; right-click a thumbnail → **Remove from thumbnails** to drop it. Click a thumbnail to scroll to that image. Per-brief selection is stored in the DB; a size slider in the strip's title row scales every thumbnail together (5 presets from 64×48 up to 200×150), persisted per-tab
+- **Opt-in thumbnail strip**: a curated row of screenshots below the editor — *not* every embedded image automatically. Right-click any image in the editor → **Add to thumbnails** to pin it; right-click a thumbnail → **Remove from thumbnails** to drop it. Click a thumbnail to scroll to that image. Per-brief selection is stored in the DB; a size slider in the strip's title row scales every thumbnail together (5 presets from 64×48 up to 200×150), persisted per-tab. A **Border…** button next to the slider opens a small editor to set the thumbnail outline **color** and **thickness** (0–8 px, 0 = no border) with a live preview — also persisted per-tab
 - **Collapse all / Expand all**: fold every body block under each heading so you can see the document skeleton, then expand back when reading
 - **Output options**: save to the Briefs tab, download as `.docx`, or both (via checkboxes in the Generate Brief dialog)
 - **Include images**: optional toggle per brief — when on, images from source journal entries are preserved
@@ -92,7 +92,7 @@ A workspace for consolidated trading documents — auto-generated digests or fre
 
 A long-form playbook tab — separate database table from Briefs so per-setup playbooks don't co-mingle with daily digests.
 
-- **Same navigator as Briefs**: outline pane (toggleable), opt-in thumbnail strip with right-click add/remove + a size slider (toggleable), collapse-all / expand-all heading sections — built for documents with dozens of screenshots where only a handful matter
+- **Same navigator as Briefs**: outline pane (toggleable), opt-in thumbnail strip with right-click add/remove + a size slider + a **Border…** color/thickness editor (toggleable), collapse-all / expand-all heading sections — built for documents with dozens of screenshots where only a handful matter
 - **Pre-seeded pages**: one empty page per default tag on first launch (Breakout, EP_Earnings, EP_Other, Parabolic Long, Parabolic Short). Add or delete pages freely; deletions stick across re-launches
 - **Same editor, same toolbar**: H1/H2/H3 buttons, image paste/drop, Ctrl+wheel scaling, draw, find/replace, export to docx/txt/md/html — identical to Journal and Briefs
 - **Search + date filter**: title + content LIKE search, with the same UTC-aware local-date conversion as Briefs
@@ -372,7 +372,7 @@ Every persisted preference is registered in `gui/settings_keys.py` so there's a 
 - **Calendar display mode**: cell content mode (P&L / count / W-L) + last-viewed month/year persisted
 - **Reports**: active sub-tab + custom price + hold-time bin edges
 - **Journal + Briefs + Strategies**: splitter geometry, last-selected row, has-journal-only toggle, last export directory, search/filter state
-- **Briefs + Strategies extras**: outline pane visibility, thumbnail strip visibility, thumbnail size index (persisted independently per tab); the *set* of pinned thumbnails lives on the brief/strategy DB row, not in QSettings
+- **Briefs + Strategies extras**: outline pane visibility, thumbnail strip visibility, thumbnail size index, thumbnail border color + width (all persisted independently per tab); the *set* of pinned thumbnails lives on the brief/strategy DB row, not in QSettings
 - **Editor defaults**: persistent default char format (size / color / bold / italic / underline) for new entries
 - **Goals**: daily / weekly / monthly / yearly P&L targets
 - **R-multiple**: default risk-dollar amount for trades without a recorded stop

@@ -51,12 +51,15 @@ from gui.settings_keys import (
     BRIEFS_SHOW_OUTLINE as SETTINGS_SHOW_OUTLINE,
     BRIEFS_SHOW_THUMBS as SETTINGS_SHOW_THUMBS,
     BRIEFS_SPLITTER as SETTINGS_SPLITTER,
+    BRIEFS_THUMB_BORDER_COLOR as SETTINGS_THUMB_BORDER_COLOR,
+    BRIEFS_THUMB_BORDER_WIDTH as SETTINGS_THUMB_BORDER_WIDTH,
     BRIEFS_THUMB_SIZE_INDEX as SETTINGS_THUMB_SIZE_INDEX,
 )
 from gui.widgets.find_bar import FindBar
 from gui.widgets.journal_editor import JournalEditor
 from gui.widgets.rich_text_toolbar import RichTextToolbar
 from gui.widgets.strategy_navigator import (
+    DEFAULT_THUMB_BORDER_COLOR, DEFAULT_THUMB_BORDER_WIDTH,
     DEFAULT_THUMB_SIZE_INDEX, ImageThumbStrip, OutlineWidget, THUMB_SIZES,
     scroll_editor_to_block,
 )
@@ -389,6 +392,7 @@ class BriefsTab(QWidget):
             self._on_thumb_remove_requested,
         )
         self.thumb_strip.size_changed.connect(self._on_thumb_size_changed)
+        self.thumb_strip.border_changed.connect(self._on_thumb_border_changed)
         # Thumbnail-tag plumbing (chip rail toggles + per-thumb
         # right-click submenu). Add/manage requests bubble up here
         # because the strip is DB-agnostic by design.
@@ -991,6 +995,12 @@ class BriefsTab(QWidget):
             return
         self._settings.setValue(SETTINGS_THUMB_SIZE_INDEX, int(index))
 
+    def _on_thumb_border_changed(self, color_hex: str, width: int) -> None:
+        if self._settings is None:
+            return
+        self._settings.setValue(SETTINGS_THUMB_BORDER_COLOR, str(color_hex))
+        self._settings.setValue(SETTINGS_THUMB_BORDER_WIDTH, int(width))
+
     # ---- collapse / expand --------------------------------------------
 
     def _on_collapse_all(self) -> None:
@@ -1061,6 +1071,19 @@ class BriefsTab(QWidget):
             idx = DEFAULT_THUMB_SIZE_INDEX
         idx = max(0, min(idx, len(THUMB_SIZES) - 1))
         self.thumb_strip.set_size_index(idx)
+
+        # Thumbnail border color + width — the strip validates/clamps.
+        border_color = self._settings.value(
+            SETTINGS_THUMB_BORDER_COLOR, DEFAULT_THUMB_BORDER_COLOR,
+        )
+        raw_w = self._settings.value(
+            SETTINGS_THUMB_BORDER_WIDTH, DEFAULT_THUMB_BORDER_WIDTH,
+        )
+        try:
+            border_w = int(raw_w)
+        except (TypeError, ValueError):
+            border_w = DEFAULT_THUMB_BORDER_WIDTH
+        self.thumb_strip.set_border_style(str(border_color), border_w)
 
     @staticmethod
     def _coerce_bool(v, *, default: bool) -> bool:

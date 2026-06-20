@@ -38,12 +38,15 @@ from gui.dialogs.draw_dialog import DrawDialog
 from gui.dialogs.export_document import ExportDocumentDialog
 from gui.settings_keys import (
     STRATEGIES_LAST_EXPORT_DIR, STRATEGIES_LAST_ID, STRATEGIES_SHOW_OUTLINE,
-    STRATEGIES_SHOW_THUMBS, STRATEGIES_SPLITTER, STRATEGIES_THUMB_SIZE_INDEX,
+    STRATEGIES_SHOW_THUMBS, STRATEGIES_SPLITTER,
+    STRATEGIES_THUMB_BORDER_COLOR, STRATEGIES_THUMB_BORDER_WIDTH,
+    STRATEGIES_THUMB_SIZE_INDEX,
 )
 from gui.widgets.find_bar import FindBar
 from gui.widgets.journal_editor import JournalEditor
 from gui.widgets.rich_text_toolbar import RichTextToolbar
 from gui.widgets.strategy_navigator import (
+    DEFAULT_THUMB_BORDER_COLOR, DEFAULT_THUMB_BORDER_WIDTH,
     DEFAULT_THUMB_SIZE_INDEX, ImageThumbStrip, OutlineWidget, THUMB_SIZES,
     scroll_editor_to_block,
 )
@@ -354,6 +357,7 @@ class StrategiesTab(QWidget):
             self._on_thumb_remove_requested,
         )
         self.thumb_strip.size_changed.connect(self._on_thumb_size_changed)
+        self.thumb_strip.border_changed.connect(self._on_thumb_border_changed)
         # Thumbnail-tag plumbing (chip rail toggles + per-thumb
         # right-click submenu). Add/manage requests bubble up here
         # because the strip is DB-agnostic by design.
@@ -927,6 +931,12 @@ class StrategiesTab(QWidget):
             return
         self._settings.setValue(STRATEGIES_THUMB_SIZE_INDEX, int(index))
 
+    def _on_thumb_border_changed(self, color_hex: str, width: int) -> None:
+        if self._settings is None:
+            return
+        self._settings.setValue(STRATEGIES_THUMB_BORDER_COLOR, str(color_hex))
+        self._settings.setValue(STRATEGIES_THUMB_BORDER_WIDTH, int(width))
+
     # ---- collapse / expand -----------------------------------------------
 
     def _on_collapse_all(self) -> None:
@@ -1000,6 +1010,19 @@ class StrategiesTab(QWidget):
             idx = DEFAULT_THUMB_SIZE_INDEX
         idx = max(0, min(idx, len(THUMB_SIZES) - 1))
         self.thumb_strip.set_size_index(idx)
+
+        # Thumbnail border color + width — the strip validates/clamps.
+        border_color = self._settings.value(
+            STRATEGIES_THUMB_BORDER_COLOR, DEFAULT_THUMB_BORDER_COLOR,
+        )
+        raw_w = self._settings.value(
+            STRATEGIES_THUMB_BORDER_WIDTH, DEFAULT_THUMB_BORDER_WIDTH,
+        )
+        try:
+            border_w = int(raw_w)
+        except (TypeError, ValueError):
+            border_w = DEFAULT_THUMB_BORDER_WIDTH
+        self.thumb_strip.set_border_style(str(border_color), border_w)
 
     @staticmethod
     def _coerce_bool(v, *, default: bool) -> bool:
