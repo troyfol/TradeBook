@@ -9,6 +9,28 @@ from PySide6.QtGui import QColor
 
 COLOR_WIN = QColor("#00C853")
 COLOR_LOSS = QColor("#FF1744")
+# Muted tones for realized P&L on a still-open (partially closed) trade —
+# dimmer than the finalized win/loss colors so a provisional figure never
+# reads as a booked result.
+COLOR_REALIZED_WIN = QColor("#4E9E68")
+COLOR_REALIZED_LOSS = QColor("#B0576A")
+
+
+def _open_shares(row: dict) -> int:
+    """Remaining open shares for a trade = total minus already-closed."""
+    total = int(row.get("total_shares") or 0)
+    closed = int(row.get("closed_shares") or 0)
+    return max(total - closed, 0)
+
+
+def _is_partial_open(row: dict) -> bool:
+    """True when this open trade has been partially scaled out of."""
+    if row.get("net_pnl") is not None or row.get("exit_time") is not None:
+        return False
+    return (
+        int(row.get("closed_shares") or 0) > 0
+        and row.get("realized_net_pnl") is not None
+    )
 
 
 class TradeTableModel(QAbstractTableModel):
@@ -93,11 +115,34 @@ class TradeTableModel(QAbstractTableModel):
             if key in ("gross_pnl", "net_pnl"):
                 val = row.get(key)
                 if val is None:
+                    # Provisional realized P&L on a partially-closed open
+                    # trade — dimmer so it reads as "not booked yet".
+                    if _is_partial_open(row):
+                        rkey = ("realized_pnl" if key == "gross_pnl"
+                                else "realized_net_pnl")
+                        rval = row.get(rkey)
+                        if rval is not None and rval > 0:
+                            return COLOR_REALIZED_WIN
+                        if rval is not None and rval < 0:
+                            return COLOR_REALIZED_LOSS
                     return None
                 if val > 0:
                     return COLOR_WIN
                 if val < 0:
                     return COLOR_LOSS
+            return None
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if _is_partial_open(row) and key in (
+                "gross_pnl", "net_pnl", "total_shares",
+            ):
+                total = int(row.get("total_shares") or 0)
+                closed = int(row.get("closed_shares") or 0)
+                return (
+                    f"Realized on {closed:,} of {total:,} shares closed. "
+                    f"{_open_shares(row):,} still open — full P&L posts "
+                    "when the position fully closes."
+                )
             return None
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
@@ -133,6 +178,21 @@ class TradeTableModel(QAbstractTableModel):
                 return val.strftime("%Y-%m-%d %H:%M")
             # fall back to string form if the driver gave us a raw str
             return str(val)[:16]
+
+        # Partially-closed open trade: show the realized P&L on the closed
+        # slice (marked with * so it reads as provisional) and the open
+        # remaining share count instead of the raw total.
+        if _is_partial_open(row):
+            if key in ("gross_pnl", "net_pnl"):
+                rkey = ("realized_pnl" if key == "gross_pnl"
+                        else "realized_net_pnl")
+                rval = row.get(rkey)
+                if rval is not None:
+                    sign = "-" if rval < 0 else ""
+                    return f"~{sign}${abs(rval):,.2f}*"
+            if key == "total_shares":
+                total = int(row.get("total_shares") or 0)
+                return f"{_open_shares(row):,} (of {total:,})"
 
         if val is None:
             return "—"

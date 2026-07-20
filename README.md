@@ -18,6 +18,7 @@ Paste your TradeStation order exports, and TradeBook automatically groups execut
 - **Paste-to-import**: paste TradeStation order exports directly into the app (tab-delimited)
 - **Smart dedup**: import-hash prevents duplicate executions on re-paste
 - **Trade builder**: state machine groups fills into logical trades (Long/Short), computing VWAP entry/exit prices, gross/net P&L, and hold duration. Resilient — a single bad fill is reported as an error and the state machine resets, preserving completed trades that came before it
+- **Partial closes (scale-outs)**: when you exit only part of a position (e.g. sell 600 of 1,140 shares), the trade stays a single **open** position — it isn't counted as a closed trade or added to any stat until the whole position is flat — but it now tracks the realized P&L on the closed slice so the process is visible. Open Positions shows the remaining shares + capital, and the Trades row shows the closed-slice realized P&L (marked provisional). When the remainder finally closes, it collapses into one closed trade over the full share count
 - **Symbol parsing**: handles TradeStation extensions (`.A`, `.B`, `.D`, `.F`, `.P`, `.Q`, `.W`) and parenthetical tags (`(HB)`, `(SHO)`, etc.)
 - **Pre-import backup**: automatic SQLite snapshot before every import so bad pastes can be rolled back
 - **Inline preview editing**: parse a paste, fix typos directly on NEW rows in the preview table before importing — Delete key removes selected rows, right-click "Remove from preview" works on multi-selects
@@ -27,7 +28,7 @@ Paste your TradeStation order exports, and TradeBook automatically groups execut
 
 A free-positioning canvas of draggable, resizable, minimizable chart cards. Drop them anywhere; positions persist as absolute pixels per layout preset.
 
-- **14 chart cards** — equity curve, daily P&L bars, winning vs losing donut, hold-time W/L, avg W/L, largest gain/loss gauge, day-of-week, intraday-vs-multiday duration, price-bucket performance, hour-of-day, total fees, profit-factor gauge, tag breakdown, **open positions index** (count + capital deployed + per-symbol breakdown — independent of the date filter)
+- **14 chart cards** — equity curve, daily P&L bars, winning vs losing donut, hold-time W/L, avg W/L, largest gain/loss gauge, day-of-week, intraday-vs-multiday duration, price-bucket performance, hour-of-day, total fees, profit-factor gauge, tag breakdown, **open positions index** (count + capital deployed + per-symbol breakdown — independent of the date filter; for a partially-closed position it shows the **remaining** shares + capital and the realized P&L on the closed slice, not the full entry size)
 - **12 configurable stat cards** — total trades, win rate, profit factor, expectancy, avg/max winner/loser, total P&L, avg/max/most-profitable hold time. Drag to reorder, check to show
 - **Configurable per-card palette**: right-click a card → **Customize chart colors** to override positive / negative / axis / label / background. Per-card overrides persist across launches and sit on top of the global palette
 - **Layout presets**: snapshot the canvas as a named preset, switch between presets in one click. Right-click a preset for rename / overwrite / delete
@@ -46,7 +47,7 @@ A free-positioning canvas of draggable, resizable, minimizable chart cards. Drop
 
 ### Trades
 
-- **Sortable table**: 11 columns (date, symbol, direction, entry/exit price, shares, gross/net P&L, commission, hold time, plus a stop-loss column). Open trades pin to the bottom regardless of sort order
+- **Sortable table**: 11 columns (date, symbol, direction, entry/exit price, shares, gross/net P&L, commission, hold time, plus a stop-loss column). Open trades pin to the bottom regardless of sort order. A partially-closed open trade shows its remaining shares as `540 (of 1,140)` and displays the closed slice's realized P&L in the P&L cells, marked provisional (`~$2.85*`, muted tone, with a hover tooltip) until the position fully closes
 - **Full filter bar**: date range presets, custom dates, multi-select symbol, direction, win/loss, hold-time bounds — defaults to showing all trades
 - **Multi-select actions**: right-click to Hide, Delete (with confirmation), Edit (manual trades), Set / Clear stop loss; bulk "Delete all visible"
 - **Soft delete + recycle bin**: deletes go to a recycle bin (`File → Recycle bin…`) for 30 days; restore brings the trade back with its journal entry, tags, and stop loss intact

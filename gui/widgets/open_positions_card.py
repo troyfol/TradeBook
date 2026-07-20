@@ -124,19 +124,32 @@ class OpenPositionsCard(QFrame):
         total_capital = 0.0
         for t in trades:
             try:
-                shares = int(t.get("total_shares") or 0)
+                total_shares = int(t.get("total_shares") or 0)
+                closed_shares = int(t.get("closed_shares") or 0)
                 price = float(t.get("avg_entry_price") or 0.0)
             except (TypeError, ValueError):
                 continue
+            # Only the still-open remainder is deployed capital — a
+            # position that's been scaled out of has freed the closed
+            # slice's capital, so counting the full entry size would
+            # overstate what's actually at risk.
+            shares = max(total_shares - closed_shares, 0)
             if shares <= 0 or price <= 0:
                 continue
             value = shares * price
+            try:
+                realized = t.get("realized_net_pnl")
+                realized = float(realized) if realized is not None else None
+            except (TypeError, ValueError):
+                realized = None
             rows.append({
                 "symbol": str(t.get("symbol") or "?"),
                 "direction": str(t.get("direction") or "Long"),
                 "shares": shares,
+                "closed_shares": max(closed_shares, 0),
                 "price": price,
                 "value": value,
+                "realized": realized,
             })
             total_capital += value
         # Largest position first — most operationally relevant.
@@ -208,10 +221,33 @@ class OpenPositionsCard(QFrame):
         layout.addWidget(dir_lbl)
         layout.addWidget(shares)
         layout.addStretch()
-        layout.addWidget(value)
-        wrap.setToolTip(
+
+        closed = int(row.get("closed_shares") or 0)
+        realized = row.get("realized")
+        tooltip = (
             f"{row['symbol']} · {direction} · "
             f"{int(row['shares']):,} shares @ ${row['price']:,.2f}"
         )
+        # Scaled-out position: show the realized P&L on the closed slice
+        # so the partial exit is visible at a glance, tinted by sign.
+        if closed > 0 and realized is not None:
+            r_sign = "-" if realized < 0 else "+"
+            r_color = pal.positive if realized >= 0 else pal.negative
+            realized_lbl = QLabel(f"{r_sign}${abs(realized):,.2f}")
+            realized_lbl.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+            )
+            realized_lbl.setStyleSheet(
+                f"color: {r_color}; font-size: 9pt;"
+            )
+            realized_lbl.setToolTip("Realized P&L on the closed portion")
+            layout.addWidget(realized_lbl)
+            tooltip += (
+                f"\n{closed:,} shares closed · "
+                f"realized {r_sign}${abs(realized):,.2f}"
+            )
+
+        layout.addWidget(value)
+        wrap.setToolTip(tooltip)
         self._row_widgets.append(wrap)
         return wrap

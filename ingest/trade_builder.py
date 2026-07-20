@@ -41,6 +41,18 @@ class BuiltTrade:
     net_pnl: Optional[float]
     hold_duration_seconds: Optional[int]
     is_open: bool
+    # Partial-close tracking for open positions that have been scaled
+    # out of. ``closed_shares`` is how many of ``total_shares`` have
+    # already been exited while the trade is still open; ``realized_*``
+    # are the P&L on that closed slice. These stay informational — the
+    # trade is NOT counted as closed (exit_time / net_pnl stay None) until
+    # the whole position is flat, at which point it finalizes as one
+    # closed trade over all shares. For a fully-closed trade
+    # ``closed_shares == total_shares`` and the realized fields are None
+    # (the realized P&L lives in gross_pnl / net_pnl instead).
+    closed_shares: int = 0
+    realized_pnl: Optional[float] = None
+    realized_net_pnl: Optional[float] = None
     execution_hashes: list[str] = field(default_factory=list)
 
 
@@ -56,13 +68,20 @@ def _finalize(symbol: str, direction: str, entry_fills: list[dict],
               exit_fills: list[dict], is_open: bool) -> BuiltTrade:
     avg_entry, entry_shares = _vwap(entry_fills)
     entry_time = min(f["entered_at"] for f in entry_fills)
-    total_commission = (
-        sum(f["commission"] for f in entry_fills)
-        + sum(f["commission"] for f in exit_fills)
-    )
+    entry_commission = sum(f["commission"] for f in entry_fills)
+    exit_commission = sum(f["commission"] for f in exit_fills)
+    total_commission = entry_commission + exit_commission
     execution_hashes = [f["import_hash"] for f in entry_fills + exit_fills]
 
     if is_open or not exit_fills:
+        # Still-open trade. If it's been partially scaled out of, compute
+        # the realized P&L on the closed slice so the process is visible,
+        # but keep it uncounted as a closed trade (exit_time / gross / net
+        # stay None) until the position is fully flat.
+        closed_shares, realized_pnl, realized_net_pnl = _partial_realized(
+            direction, avg_entry, entry_shares, entry_commission,
+            exit_fills, exit_commission,
+        )
         return BuiltTrade(
             symbol=symbol,
             direction=direction,
@@ -76,6 +95,9 @@ def _finalize(symbol: str, direction: str, entry_fills: list[dict],
             net_pnl=None,
             hold_duration_seconds=None,
             is_open=True,
+            closed_shares=closed_shares,
+            realized_pnl=realized_pnl,
+            realized_net_pnl=realized_net_pnl,
             execution_hashes=execution_hashes,
         )
 
@@ -100,8 +122,39 @@ def _finalize(symbol: str, direction: str, entry_fills: list[dict],
         net_pnl=net,
         hold_duration_seconds=int((exit_time - entry_time).total_seconds()),
         is_open=False,
+        # A fully-closed trade has every share realized; the P&L already
+        # lives in gross_pnl / net_pnl, so the realized_* slice fields stay
+        # None to avoid double-reporting.
+        closed_shares=entry_shares,
         execution_hashes=execution_hashes,
     )
+
+
+def _partial_realized(
+    direction: str, avg_entry: float, entry_shares: int,
+    entry_commission: float, exit_fills: list[dict], exit_commission: float,
+) -> tuple[int, Optional[float], Optional[float]]:
+    """Realized P&L on the already-exited slice of a still-open trade.
+
+    Returns ``(closed_shares, realized_gross, realized_net)``. When no
+    exits have happened yet, returns ``(0, None, None)``. The net figure
+    charges the full exit commission plus the share of entry commission
+    proportional to the closed slice — the rest of the entry commission
+    stays with the shares that are still open.
+    """
+    avg_exit, closed_shares = _vwap(exit_fills)
+    if closed_shares <= 0:
+        return 0, None, None
+    if direction == DIR_LONG:
+        realized_gross = (avg_exit - avg_entry) * closed_shares
+    else:
+        realized_gross = (avg_entry - avg_exit) * closed_shares
+    prorated_entry_comm = (
+        entry_commission * (closed_shares / entry_shares)
+        if entry_shares else 0.0
+    )
+    realized_net = realized_gross - exit_commission - prorated_entry_comm
+    return closed_shares, realized_gross, realized_net
 
 
 def _build_for_symbol(

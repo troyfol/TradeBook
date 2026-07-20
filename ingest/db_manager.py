@@ -108,6 +108,15 @@ CREATE TABLE IF NOT EXISTS trades (
     hold_duration_seconds INTEGER,
     is_open BOOLEAN NOT NULL DEFAULT 0,
     is_manual BOOLEAN NOT NULL DEFAULT 0,
+    -- Partial-close tracking for open positions that have been scaled out
+    -- of. closed_shares = how many of total_shares are already exited while
+    -- the trade is still open (equals total_shares once fully closed);
+    -- realized_pnl / realized_net_pnl are the P&L on that closed slice,
+    -- shown for process visibility but kept out of closed-trade analytics
+    -- (net_pnl / exit_time stay NULL) until the whole position is flat.
+    closed_shares INTEGER NOT NULL DEFAULT 0,
+    realized_pnl REAL,
+    realized_net_pnl REAL,
     -- Optional planned-stop price for R-multiple analytics. Null = no
     -- stop recorded for this trade.
     stop_loss_price REAL,
@@ -285,6 +294,18 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     """
     if not _column_exists(conn, "trades", "stop_loss_price"):
         conn.execute("ALTER TABLE trades ADD COLUMN stop_loss_price REAL")
+    # Partial-close tracking (scale-outs on still-open positions). Constant
+    # defaults keep the ADD COLUMN cheap and leave existing rows valid —
+    # they get correct values on the next rebuild_trades cycle.
+    if not _column_exists(conn, "trades", "closed_shares"):
+        conn.execute(
+            "ALTER TABLE trades ADD COLUMN closed_shares "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    if not _column_exists(conn, "trades", "realized_pnl"):
+        conn.execute("ALTER TABLE trades ADD COLUMN realized_pnl REAL")
+    if not _column_exists(conn, "trades", "realized_net_pnl"):
+        conn.execute("ALTER TABLE trades ADD COLUMN realized_net_pnl REAL")
     # Per-document thumbnail selection — JSON-encoded list of
     # attachment ids that should appear in the thumbnail strip. NULL /
     # missing / empty list means "no thumbnails", matching the new
@@ -497,14 +518,16 @@ def rebuild_trades(conn: sqlite3.Connection) -> tuple[int, list[str]]:
                 symbol, direction, entry_time, exit_time,
                 avg_entry_price, avg_exit_price, total_shares,
                 total_commission, gross_pnl, net_pnl,
-                hold_duration_seconds, is_open, is_manual
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                hold_duration_seconds, is_open, is_manual,
+                closed_shares, realized_pnl, realized_net_pnl
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 t.symbol, t.direction, t.entry_time, t.exit_time,
                 t.avg_entry_price, t.avg_exit_price, t.total_shares,
                 t.total_commission, t.gross_pnl, t.net_pnl,
                 t.hold_duration_seconds, 1 if t.is_open else 0,
+                t.closed_shares, t.realized_pnl, t.realized_net_pnl,
             ),
         )
         trade_id = cur.lastrowid
