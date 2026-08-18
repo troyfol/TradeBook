@@ -19,7 +19,8 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QPushButton, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QHBoxLayout, QPushButton, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from analytics import (
@@ -36,6 +37,7 @@ from gui.dialogs.r_multiple_settings import load_default_risk
 from gui.settings_keys import (
     REPORTS_ACTIVE_SUBTAB as SETTINGS_ACTIVE_TAB,
     REPORTS_HOLD_EDGES_MINUTES as SETTINGS_HOLD_EDGES_MINUTES,
+    REPORTS_PLANNED_STOPS_ONLY as SETTINGS_PLANNED_STOPS_ONLY,
     REPORTS_PRICE_EDGES as SETTINGS_PRICE_EDGES,
 )
 from gui.widgets.report_filter_bar import ReportFilterBar
@@ -101,9 +103,26 @@ class ReportsTab(QWidget):
             "Set custom bin edges for the active bucket-based report."
         )
 
+        # Only meaningful on the R-Multiple report — apply_import_time_risk
+        # back-fills a stop for every loser from its own realized loss, so
+        # those trades are -1R by construction. Ticking this drops them and
+        # leaves only stops the user actually planned.
+        self.chk_planned_stops = QCheckBox("Planned stops only", self)
+        self.chk_planned_stops.setToolTip(
+            "Exclude trades whose stop was auto-filled at import from the "
+            "trade's own realized loss.\nThose are always exactly -1R, so "
+            "including them makes the R distribution look tighter than it is."
+        )
+        self.chk_planned_stops.setChecked(
+            self._load_planned_stops_only()
+        )
+        self.chk_planned_stops.toggled.connect(self._on_planned_stops_toggled)
+        self.chk_planned_stops.setVisible(False)
+
         bins_row = QHBoxLayout()
         bins_row.setContentsMargins(0, 0, 0, 0)
         bins_row.addStretch()
+        bins_row.addWidget(self.chk_planned_stops)
         bins_row.addWidget(self.btn_bins)
 
         # ---- sub-tabs ------------------------------------------------------
@@ -176,6 +195,8 @@ class ReportsTab(QWidget):
 
     def _update_bins_button(self, idx: int) -> None:
         label = self._label_for(idx)
+        # The planned-stops filter only applies to the R-Multiple report.
+        self.chk_planned_stops.setVisible(label == LABEL_BY_R)
         if label == LABEL_BY_PRICE:
             self.btn_bins.setText("Configure Price Bins…")
             self.btn_bins.setEnabled(True)
@@ -208,11 +229,28 @@ class ReportsTab(QWidget):
             report = builder(self._filtered_cache, edges=edges_seconds)
         elif label == LABEL_BY_R:
             default_risk = load_default_risk(self._settings) or None
-            report = builder(self._filtered_cache, default_risk=default_risk)
+            report = builder(
+                self._filtered_cache,
+                default_risk=default_risk,
+                exclude_derived=self.chk_planned_stops.isChecked(),
+            )
         else:
             report = builder(self._filtered_cache)
 
         self._views[idx].set_report(report)
+
+    # ---- planned-stops filter ----------------------------------------------
+
+    def _load_planned_stops_only(self) -> bool:
+        if self._settings is None:
+            return False
+        raw = self._settings.value(SETTINGS_PLANNED_STOPS_ONLY, False)
+        return str(raw).lower() in ("1", "true", "yes")
+
+    def _on_planned_stops_toggled(self, checked: bool) -> None:
+        if self._settings is not None:
+            self._settings.setValue(SETTINGS_PLANNED_STOPS_ONLY, checked)
+        self._render_active()
 
     # ---- bin configuration -------------------------------------------------
 

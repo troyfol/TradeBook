@@ -50,6 +50,20 @@ def _resource_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+# Application version. Shown in the window title and stamped into the
+# exe's file properties via version_info.txt.
+#
+# 2.0.0 — audit release: exits timestamped by fill time rather than
+#         order-entry time, partial fills on non-Filled rows reach the
+#         trade builder, over-sells salvage their P&L, imports are
+#         genuinely atomic, unused daily_summary dropped.
+# 2.1.0 — position flips are resolved up front, once per block of
+#         shares, and the answer sticks: stop the import, delete the
+#         extra shares, leave it open (flipped), or close it to P&L.
+#         Resolved fills stay visibly contested in Manage Executions,
+#         which is now scoped to the trades you have selected.
+APP_VERSION = "2.1.0"
+
 PROJECT_ROOT = _project_root()
 RESOURCE_ROOT = _resource_root()
 

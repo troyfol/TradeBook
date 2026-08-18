@@ -133,6 +133,14 @@ class TradeTableModel(QAbstractTableModel):
             return None
 
         if role == Qt.ItemDataRole.ToolTipRole:
+            if key == "stop_loss_price" and row.get("stop_is_derived"):
+                return (
+                    "Auto-filled at import from this trade's realized "
+                    "loss, not a stop you planned — so it scores exactly "
+                    "-1R by construction.\nTick “Planned stops only” on "
+                    "the By R-Multiple report to exclude these, or set a "
+                    "real stop via right-click → Set stop loss…"
+                )
             if _is_partial_open(row) and key in (
                 "gross_pnl", "net_pnl", "total_shares",
             ):
@@ -161,7 +169,14 @@ class TradeTableModel(QAbstractTableModel):
         self.layoutAboutToBeChanged.emit()
         with_val = [r for r in self._rows if r.get(key) is not None]
         without_val = [r for r in self._rows if r.get(key) is None]
-        with_val.sort(key=lambda r: r[key], reverse=reverse)
+        # Sort on (type-name, value) so a column holding mixed types can't
+        # raise. entry_time in particular can arrive as either a datetime
+        # or a raw str depending on the sqlite converter — see _format's
+        # fallback — and comparing the two is a TypeError that would take
+        # down the whole tab on a header click.
+        with_val.sort(
+            key=lambda r: (type(r[key]).__name__, r[key]), reverse=reverse,
+        )
         # Open trades (None exit/pnl) always pinned at the bottom regardless of order.
         self._rows = with_val + without_val
         self.layoutChanged.emit()
@@ -197,7 +212,14 @@ class TradeTableModel(QAbstractTableModel):
         if val is None:
             return "—"
 
-        if key in ("avg_entry_price", "avg_exit_price", "stop_loss_price"):
+        if key == "stop_loss_price":
+            # Mark stops that were back-filled at import from the trade's
+            # own realized loss rather than planned by the user — those
+            # are -1R by construction, so they shouldn't read as a real
+            # planned stop at a glance.
+            suffix = "*" if row.get("stop_is_derived") else ""
+            return f"{val:.4f}{suffix}"
+        if key in ("avg_entry_price", "avg_exit_price"):
             return f"{val:.4f}"
         if key in ("gross_pnl", "net_pnl", "total_commission"):
             sign = "-" if val < 0 else ""
@@ -210,11 +232,20 @@ class TradeTableModel(QAbstractTableModel):
 
 
 def _format_duration(seconds: int) -> str:
+    """Mirror ``analytics.metrics._fmt_hold`` exactly.
+
+    Without the day tier, a multiday hold rendered here as "265h 35m"
+    while the dashboard stat card called the same value "11d 1h".
+    """
     if seconds < 60:
         return f"{seconds}s"
     if seconds < 3600:
         m, s = divmod(seconds, 60)
         return f"{m}m {s}s"
-    h, rem = divmod(seconds, 3600)
-    m, _ = divmod(rem, 60)
-    return f"{h}h {m}m"
+    if seconds < 86400:
+        h, rem = divmod(seconds, 3600)
+        m, _ = divmod(rem, 60)
+        return f"{h}h {m}m"
+    d, rem = divmod(seconds, 86400)
+    h, _ = divmod(rem, 3600)
+    return f"{d}d {h}h"

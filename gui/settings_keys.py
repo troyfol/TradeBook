@@ -67,6 +67,9 @@ CALENDAR_CELL_MODE = "calendar/cell_mode"
 REPORTS_ACTIVE_SUBTAB = "reports/active_subtab"
 REPORTS_PRICE_EDGES = "reports/price_edges"
 REPORTS_HOLD_EDGES_MINUTES = "reports/hold_edges_minutes"
+# By R-Multiple: exclude stops that apply_import_time_risk
+# back-filled from the trade's own realized loss.
+REPORTS_PLANNED_STOPS_ONLY = "reports/planned_stops_only"
 
 
 # ---- Journal ---------------------------------------------------------------

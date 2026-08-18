@@ -17,7 +17,10 @@ from PySide6.QtWidgets import (
     QDialog, QMainWindow, QMessageBox, QStatusBar, QTabWidget,
 )
 
-from config import AUTO_BACKUPS_DIR, BACKUPS_DIR, DB_PATH, MANUAL_BACKUPS_DIR
+from config import (
+    APP_VERSION, AUTO_BACKUPS_DIR, BACKUPS_DIR, DB_PATH,
+    MANUAL_BACKUPS_DIR,
+)
 from gui.dialogs.r_multiple_settings import RMultipleSettingsDialog
 from gui.dialogs.recycle_bin import RecycleBinDialog
 from gui.dialogs.restore_backup import RestoreBackupDialog
@@ -62,7 +65,7 @@ class MainWindow(QMainWindow):
         # launches.
         init_palette(self._settings)
 
-        self.setWindowTitle("TradeBook")
+        self.setWindowTitle(f"TradeBook v{APP_VERSION}")
         self.setStatusBar(QStatusBar(self))
         self._build_menu_bar()
 

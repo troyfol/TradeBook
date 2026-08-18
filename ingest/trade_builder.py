@@ -6,9 +6,29 @@ State machine per symbol (chronological order, Type column is authoritative):
     Sell Short     → open / add to Short
     Buy to Cover   → reduce / close Short
 
-Position-flip handling is intentionally not supported (the broker rejects
-these at order time, per user workflow). Any exit exceeding the open
-position raises TradeBuilderError.
+An exit that closes more shares than the position holds is a *flip*. The
+broker normally rejects these at order time, so in practice one means the
+export is missing fills. The builder never guesses: it reports the flip
+as a ``FlipInstance`` and the user resolves it once, per block of shares,
+in the pre-import dialog. The chosen resolution is stored on the
+execution and replayed on every later rebuild, so an answered flip stays
+answered.
+
+Resolutions (see ``RESOLUTION_*``):
+    delete_extra  — drop the unmatched shares from the fill. The trade
+                    closes at the position size it actually held, so P&L
+                    is unchanged from the shares-held baseline.
+    close_to_pnl  — book the unmatched shares into the trade at its own
+                    average entry price, so the trade closes at its full
+                    exit size. Use when the export is missing entry fills.
+    leave_open    — close what was held, then open a real position in the
+                    opposite direction for the remainder. Use when the
+                    flip genuinely happened.
+
+With no resolution recorded, the builder falls back to ``delete_extra``'s
+shape (close what was held) but *also* emits the flip so the caller can
+warn — that keeps a never-answered flip visible without losing the P&L
+on the shares that did trade.
 """
 from __future__ import annotations
 
@@ -25,6 +45,91 @@ from config import (
 
 class TradeBuilderError(Exception):
     pass
+
+
+# ---- flip resolutions ------------------------------------------------------
+
+RESOLUTION_DELETE_EXTRA = "delete_extra"
+RESOLUTION_CLOSE_TO_PNL = "close_to_pnl"
+RESOLUTION_LEAVE_OPEN = "leave_open"
+
+# "Stop the import and let me re-upload" is a caller-level choice, not a
+# builder one — it aborts before anything is written, so it never reaches
+# here. Listed for the UI's benefit.
+RESOLUTION_STOP_IMPORT = "stop_import"
+
+VALID_RESOLUTIONS = frozenset({
+    RESOLUTION_DELETE_EXTRA,
+    RESOLUTION_CLOSE_TO_PNL,
+    RESOLUTION_LEAVE_OPEN,
+})
+
+RESOLUTION_LABELS = {
+    RESOLUTION_DELETE_EXTRA: "Delete extra shares",
+    RESOLUTION_CLOSE_TO_PNL: "Close to P&L",
+    RESOLUTION_LEAVE_OPEN: "Leave as open (flipped)",
+}
+
+
+class FlipInstance(str):
+    """One block of shares that couldn't be paired against a position.
+
+    Subclasses ``str`` so it flows through the existing ``list[str]``
+    error channel untouched — anything that just prints or greps the
+    message keeps working — while carrying the structured fields the
+    resolution UI needs. Deliberately per *fill*, not per share: the
+    user answers "what happens to these 6 shares" once, not six times.
+    """
+
+    __slots__ = (
+        "symbol", "import_hash", "entered_at", "type", "direction",
+        "filled_price", "position_shares", "fill_shares", "excess_shares",
+        "avg_entry_price",
+    )
+
+    def __new__(
+        cls, *, symbol: str, import_hash: str, entered_at: datetime,
+        type: str, direction: str, filled_price: float,
+        position_shares: int, fill_shares: int, excess_shares: int,
+        avg_entry_price: float,
+    ) -> "FlipInstance":
+        flip = "Long→Short" if direction == DIR_LONG else "Short→Long"
+        self = super().__new__(cls, (
+            f"{symbol}: {type} at {entered_at} would flip {flip} — "
+            f"{fill_shares} share(s) against a {position_shares}-share "
+            f"position, {excess_shares} unmatched"
+        ))
+        self.symbol = symbol
+        self.import_hash = import_hash
+        self.entered_at = entered_at
+        self.type = type
+        self.direction = direction
+        self.filled_price = filled_price
+        self.position_shares = position_shares
+        self.fill_shares = fill_shares
+        self.excess_shares = excess_shares
+        self.avg_entry_price = avg_entry_price
+        return self
+
+    @property
+    def message(self) -> str:
+        return str(self)
+
+
+def _fill_time(f: dict) -> datetime:
+    """When a fill actually happened, not when its order was entered.
+
+    TradeStation reports both, and for a resting order they can be days
+    apart — a stop entered on the 6th that triggers on the 17th shows
+    ``entered_at`` of the 6th. Exits are timestamped by fill so P&L
+    lands on the day the position really closed and hold durations
+    reflect the real time in the market. Entries keep using
+    ``entered_at``: entry fills are effectively instant, and moving them
+    would re-bucket the by-hour / by-weekday reports.
+
+    Falls back to ``entered_at`` for rows with no fill timestamp.
+    """
+    return f.get("filled_canceled_at") or f["entered_at"]
 
 
 @dataclass
@@ -71,7 +176,13 @@ def _finalize(symbol: str, direction: str, entry_fills: list[dict],
     entry_commission = sum(f["commission"] for f in entry_fills)
     exit_commission = sum(f["commission"] for f in exit_fills)
     total_commission = entry_commission + exit_commission
-    execution_hashes = [f["import_hash"] for f in entry_fills + exit_fills]
+    # Synthetic fills (close_to_pnl's reconstructed entry shares) carry no
+    # import_hash — they correspond to no execution row, so they must not
+    # produce a trade_executions link.
+    execution_hashes = [
+        f["import_hash"] for f in entry_fills + exit_fills
+        if f.get("import_hash")
+    ]
 
     if is_open or not exit_fills:
         # Still-open trade. If it's been partially scaled out of, compute
@@ -102,7 +213,7 @@ def _finalize(symbol: str, direction: str, entry_fills: list[dict],
         )
 
     avg_exit, _ = _vwap(exit_fills)
-    exit_time = max(f["entered_at"] for f in exit_fills)
+    exit_time = max(_fill_time(f) for f in exit_fills)
     if direction == DIR_LONG:
         gross = (avg_exit - avg_entry) * entry_shares
     else:
@@ -120,7 +231,12 @@ def _finalize(symbol: str, direction: str, entry_fills: list[dict],
         total_commission=total_commission,
         gross_pnl=gross,
         net_pnl=net,
-        hold_duration_seconds=int((exit_time - entry_time).total_seconds()),
+        # Clamped at 0: TradeStation occasionally stamps a fill a second
+        # *before* its own order's entered_at, which would otherwise
+        # produce a negative hold on a fast scalp.
+        hold_duration_seconds=max(
+            0, int((exit_time - entry_time).total_seconds()),
+        ),
         is_open=False,
         # A fully-closed trade has every share realized; the P&L already
         # lives in gross_pnl / net_pnl, so the realized_* slice fields stay
@@ -157,20 +273,61 @@ def _partial_realized(
     return closed_shares, realized_gross, realized_net
 
 
+def _split_fill(fill: dict, qty: int) -> dict:
+    """A copy of ``fill`` covering only ``qty`` of its filled shares.
+
+    Used when an exit fill closes more shares than the position holds.
+    The **full** commission rides along with the closing slice rather
+    than being prorated: the whole order's commission is real money
+    paid, and the unmatched remainder never forms a trade to carry the
+    rest, so prorating would quietly drop it from lifetime commission.
+    ``import_hash`` is deliberately left alone so the execution still
+    links to the trade in ``trade_executions``.
+    """
+    return {**fill, "qty_filled": qty}
+
+
+def _synthetic_entry(fill: dict, qty: int, price: float) -> dict:
+    """A phantom entry fill used by ``close_to_pnl``.
+
+    The export is missing entry fills, so reconstruct them at the
+    position's own average entry price — that keeps the VWAP unchanged
+    while letting the trade close at its true exit size. It carries no
+    commission (none was paid for shares the export never recorded) and
+    no ``import_hash``, so it links to no execution row.
+    """
+    return {
+        **fill,
+        "qty_filled": qty,
+        "filled_price": price,
+        "commission": 0.0,
+        "import_hash": None,
+    }
+
+
 def _build_for_symbol(
-    symbol: str, fills: list[dict],
+    symbol: str,
+    fills: list[dict],
+    resolutions: Optional[dict[str, str]] = None,
 ) -> tuple[list[BuiltTrade], list[str]]:
     """State-machine over one symbol's fills.
 
-    Returns ``(trades, errors)``. When a fill breaks state (e.g. a
-    Sell that would flip the position to negative, or an exit with no
-    open position), the error is recorded and the builder **resets**
-    so subsequent fills can still form valid trades. Completed trades
-    from before the bad fill are preserved — this is critical: a
-    single rogue execution must not wipe out every prior trade for
-    the same symbol (that cascade-drops journal entries + tags during
-    ``rebuild_trades``).
+    Returns ``(trades, errors)``. ``errors`` holds plain strings for
+    structural problems and :class:`FlipInstance` objects (which *are*
+    strings) for unanswered flips, so callers can pick the flips back
+    out with ``isinstance``.
+
+    ``resolutions`` maps an execution's ``import_hash`` to one of the
+    ``RESOLUTION_*`` values. A resolved flip is applied silently — it
+    was answered once already and must not nag on every later rebuild.
+
+    When a fill breaks state the builder records it and **resets** so
+    subsequent fills can still form valid trades. Completed trades from
+    before the bad fill are preserved — critical, because a single rogue
+    execution must not wipe out every prior trade for the symbol (that
+    cascade-drops journal entries + tags during ``rebuild_trades``).
     """
+    resolutions = resolutions or {}
     fills = sorted(fills, key=lambda x: x["entered_at"])
     trades: list[BuiltTrade] = []
     errors: list[str] = []
@@ -185,6 +342,72 @@ def _build_for_symbol(
         direction = None
         entry_fills, exit_fills, position = [], [], 0
 
+    def _close(is_open: bool = False) -> None:
+        trades.append(
+            _finalize(symbol, direction, entry_fills, exit_fills, is_open)
+        )
+
+    def _handle_overshoot(fill: dict, qty: int) -> None:
+        """An exit fill closes more shares than the position holds.
+
+        Applies the recorded resolution for this fill, or — when none
+        exists — closes what was actually held and reports the flip so
+        the caller can put it in front of the user.
+        """
+        nonlocal direction, entry_fills, exit_fills, position
+        held = position
+        avg_entry, _ = _vwap(entry_fills)
+        flip = FlipInstance(
+            symbol=symbol,
+            import_hash=fill.get("import_hash") or "",
+            entered_at=fill["entered_at"],
+            type=fill["type"],
+            direction=direction,
+            filled_price=float(fill["filled_price"]),
+            position_shares=held,
+            fill_shares=qty,
+            excess_shares=qty - held,
+            avg_entry_price=avg_entry,
+        )
+        mode = resolutions.get(flip.import_hash)
+
+        if mode == RESOLUTION_CLOSE_TO_PNL:
+            # Reconstruct the missing entry shares at the position's own
+            # average price so the trade closes at its full exit size.
+            entry_fills.append(
+                _synthetic_entry(fill, flip.excess_shares, avg_entry)
+            )
+            exit_fills.append(fill)
+            _close()
+            _reset()
+            return
+
+        if mode == RESOLUTION_LEAVE_OPEN:
+            # A real flip: close what was held, then open a position the
+            # other way for the remainder at this fill's price. The
+            # commission was already charged to the closing leg.
+            exit_fills.append(_split_fill(fill, held))
+            _close()
+            opening = {
+                **fill, "qty_filled": flip.excess_shares, "commission": 0.0,
+            }
+            new_direction = DIR_SHORT if direction == DIR_LONG else DIR_LONG
+            _reset()
+            direction = new_direction
+            entry_fills = [opening]
+            exit_fills = []
+            position = flip.excess_shares
+            return
+
+        # RESOLUTION_DELETE_EXTRA, or not yet answered: close the shares
+        # actually held and drop the remainder. Only an *unanswered* flip
+        # is reported — an answered one has already been dealt with.
+        exit_fills.append(_split_fill(fill, held))
+        _close()
+        _reset()
+        if mode != RESOLUTION_DELETE_EXTRA:
+            errors.append(flip)
+
     for fill in fills:
         t = fill["type"]
         qty = fill["qty_filled"]
@@ -192,65 +415,44 @@ def _build_for_symbol(
             if direction is None:
                 if t == TYPE_BUY:
                     direction = DIR_LONG
-                    entry_fills = [fill]
-                    exit_fills = []
-                    position = qty
                 elif t == TYPE_SELL_SHORT:
                     direction = DIR_SHORT
-                    entry_fills = [fill]
-                    exit_fills = []
-                    position = qty
                 else:
                     raise TradeBuilderError(
                         f"{symbol}: '{t}' at {fill['entered_at']} "
                         f"has no open position"
                     )
+                entry_fills = [fill]
+                exit_fills = []
+                position = qty
                 continue
 
-            if direction == DIR_LONG:
-                if t == TYPE_BUY:
-                    entry_fills.append(fill)
-                    position += qty
-                elif t == TYPE_SELL:
-                    exit_fills.append(fill)
-                    position -= qty
-                    if position == 0:
-                        trades.append(_finalize(
-                            symbol, direction, entry_fills, exit_fills, False,
-                        ))
-                        _reset()
-                    elif position < 0:
-                        raise TradeBuilderError(
-                            f"{symbol}: Sell at {fill['entered_at']} "
-                            f"would flip Long→Short"
-                        )
-                else:
-                    raise TradeBuilderError(
-                        f"{symbol}: unexpected '{t}' on open Long "
-                        f"at {fill['entered_at']}"
-                    )
-            else:  # DIR_SHORT
-                if t == TYPE_SELL_SHORT:
-                    entry_fills.append(fill)
-                    position += qty
-                elif t == TYPE_BUY_TO_COVER:
-                    exit_fills.append(fill)
-                    position -= qty
-                    if position == 0:
-                        trades.append(_finalize(
-                            symbol, direction, entry_fills, exit_fills, False,
-                        ))
-                        _reset()
-                    elif position < 0:
-                        raise TradeBuilderError(
-                            f"{symbol}: Buy to Cover at {fill['entered_at']} "
-                            f"would flip Short→Long"
-                        )
-                else:
-                    raise TradeBuilderError(
-                        f"{symbol}: unexpected '{t}' on open Short "
-                        f"at {fill['entered_at']}"
-                    )
+            # Long and Short are mirror images — pick the pair of types
+            # that add to / reduce the open position and share one body.
+            entry_type = (
+                TYPE_BUY if direction == DIR_LONG else TYPE_SELL_SHORT
+            )
+            exit_type = (
+                TYPE_SELL if direction == DIR_LONG else TYPE_BUY_TO_COVER
+            )
+
+            if t == entry_type:
+                entry_fills.append(fill)
+                position += qty
+            elif t == exit_type:
+                if qty > position:
+                    _handle_overshoot(fill, qty)
+                    continue
+                exit_fills.append(fill)
+                position -= qty
+                if position == 0:
+                    _close()
+                    _reset()
+            else:
+                raise TradeBuilderError(
+                    f"{symbol}: unexpected '{t}' on open {direction} "
+                    f"at {fill['entered_at']}"
+                )
         except TradeBuilderError as e:
             # Record the offending fill but DO NOT drop trades we've
             # already completed. Reset state so subsequent fills can
@@ -263,19 +465,25 @@ def _build_for_symbol(
 
     # leftover open position → open trade
     if direction is not None and entry_fills:
-        trades.append(
-            _finalize(symbol, direction, entry_fills, exit_fills, True),
-        )
+        _close(is_open=True)
 
     return trades, errors
 
 
-def build_trades(executions: list[dict]) -> tuple[list[BuiltTrade], list[str]]:
+def build_trades(
+    executions: list[dict],
+    resolutions: Optional[dict[str, str]] = None,
+) -> tuple[list[BuiltTrade], list[str]]:
     """Build trades from a list of filled execution dicts.
 
-    Returns (trades, errors). Errors are per-fill strings — a single
-    malformed fill no longer aborts the whole symbol's history (see
-    ``_build_for_symbol`` for the recovery behaviour).
+    Returns (trades, errors). Errors are per-fill strings; unanswered
+    flips come back as :class:`FlipInstance` (a str subclass), so
+    ``[e for e in errors if isinstance(e, FlipInstance)]`` recovers the
+    structured ones. A single malformed fill no longer aborts the whole
+    symbol's history — see ``_build_for_symbol``.
+
+    ``resolutions`` maps ``import_hash`` → ``RESOLUTION_*``; a flip with
+    a recorded answer is applied silently.
     """
     by_symbol: dict[str, list[dict]] = defaultdict(list)
     for ex in executions:
@@ -284,7 +492,9 @@ def build_trades(executions: list[dict]) -> tuple[list[BuiltTrade], list[str]]:
     all_trades: list[BuiltTrade] = []
     errors: list[str] = []
     for symbol, fills in by_symbol.items():
-        sym_trades, sym_errors = _build_for_symbol(symbol, fills)
+        sym_trades, sym_errors = _build_for_symbol(
+            symbol, fills, resolutions,
+        )
         all_trades.extend(sym_trades)
         errors.extend(sym_errors)
 

@@ -44,7 +44,10 @@ class RStats:
 
 
 def trade_risk_dollars(
-    trade: dict, *, default_risk: Optional[float] = None,
+    trade: dict,
+    *,
+    default_risk: Optional[float] = None,
+    exclude_derived: bool = False,
 ) -> Optional[float]:
     """Dollars at risk when the trade was entered.
 
@@ -56,10 +59,19 @@ def trade_risk_dollars(
 
     A stop equal to entry collapses to zero risk and falls through to
     the default as well.
+
+    ``exclude_derived`` ignores stops that ``apply_import_time_risk``
+    back-filled (``stop_is_derived``). Those are computed from the
+    trade's own realized loss, so every loser is exactly -1R by
+    construction — a circular result that makes the R distribution look
+    tighter than reality. Excluding them leaves only stops the user
+    actually planned.
     """
     stop = trade.get("stop_loss_price")
     entry = trade.get("avg_entry_price")
     shares = trade.get("total_shares")
+    if exclude_derived and trade.get("stop_is_derived"):
+        stop = None
     if stop is not None and entry is not None and shares is not None:
         try:
             risk_per_share = abs(float(entry) - float(stop))
@@ -74,7 +86,10 @@ def trade_risk_dollars(
 
 
 def trade_r(
-    trade: dict, *, default_risk: Optional[float] = None,
+    trade: dict,
+    *,
+    default_risk: Optional[float] = None,
+    exclude_derived: bool = False,
 ) -> Optional[float]:
     """R-multiple for a single trade, or None when not computable.
 
@@ -83,7 +98,9 @@ def trade_r(
     how the "default $R per trade" setting turns unstopped trades into
     reportable R values.
     """
-    risk = trade_risk_dollars(trade, default_risk=default_risk)
+    risk = trade_risk_dollars(
+        trade, default_risk=default_risk, exclude_derived=exclude_derived,
+    )
     if risk is None:
         return None
     net = trade.get("net_pnl")
@@ -96,11 +113,18 @@ def trade_r(
 
 
 def compute_r_stats(
-    trades: Iterable[dict], *, default_risk: Optional[float] = None,
+    trades: Iterable[dict],
+    *,
+    default_risk: Optional[float] = None,
+    exclude_derived: bool = False,
 ) -> RStats:
     """Roll up R across the given trades, using ``default_risk`` as the
     fallback denominator for trades without an explicit stop."""
-    rs = [trade_r(t, default_risk=default_risk) for t in trades]
+    rs = [
+        trade_r(t, default_risk=default_risk,
+                exclude_derived=exclude_derived)
+        for t in trades
+    ]
     rs = [r for r in rs if r is not None]
     if not rs:
         return RStats()
@@ -124,10 +148,17 @@ def _format_edge(v: float) -> str:
 
 
 def _bucket_label(lo: float, hi: float) -> str:
+    """Label a half-open bucket ``[lo, hi)``.
+
+    The boundary matters: matching is ``lo <= r < hi``, so a trade at
+    exactly -3R belongs to the -3 → -2 bucket, not the tail below it.
+    The tail was previously labelled "≤ -3R", which claimed a value it
+    doesn't actually contain.
+    """
     if math.isinf(lo):
-        return f"≤ {_format_edge(hi)}"
+        return f"< {_format_edge(hi)}"
     if math.isinf(hi):
-        return f"> {_format_edge(lo)}"
+        return f"≥ {_format_edge(lo)}"
     return f"{_format_edge(lo)} → {_format_edge(hi)}"
 
 
@@ -136,6 +167,7 @@ def by_r_bucket(
     edges: Optional[list[float]] = None,
     *,
     default_risk: Optional[float] = None,
+    exclude_derived: bool = False,
 ) -> Report:
     """Group trades by R-bucket and tally count + win-rate + total R."""
     edge_list = edges if edges else DEFAULT_R_EDGES
@@ -151,7 +183,9 @@ def by_r_bucket(
     by_wins: dict[str, int] = defaultdict(int)
 
     for t in trades:
-        r = trade_r(t, default_risk=default_risk)
+        r = trade_r(
+            t, default_risk=default_risk, exclude_derived=exclude_derived,
+        )
         if r is None:
             continue
         for lo, hi, label in buckets:
@@ -181,7 +215,10 @@ def by_r_bucket(
         })
 
     return Report(
-        title="Performance by R-Multiple",
+        title=(
+            "Performance by R-Multiple (planned stops only)"
+            if exclude_derived else "Performance by R-Multiple"
+        ),
         columns=[
             ReportColumn("label", "R bucket", "str", align="left"),
             ReportColumn("trades", "Trades", "int", align="right"),
@@ -205,6 +242,11 @@ def by_r_bucket(
         chart_kind="bar",
         chart_title="Total R by Bucket",
         empty_message=(
+            "No trades with a hand-set stop match the current filters. "
+            "Back-filled stops are excluded — untick "
+            "“Planned stops only” to include them, or set a stop "
+            "via right-click → Set stop loss…"
+            if exclude_derived else
             "No trades with a stop loss (or default R) match the "
             "current filters. Set a stop via right-click → Set stop "
             "loss…, or a default $R under File → R-multiple settings…"

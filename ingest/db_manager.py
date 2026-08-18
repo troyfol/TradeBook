@@ -6,7 +6,6 @@ Scope:
     - rebuild_trades: drop & recreate trades / trade_executions from current
       executions, snapshotting journal entries + tag links by
       (symbol, entry_time, direction) so they survive the rebuild (Phase 7).
-    - rebuild_daily_summary: aggregate closed trades by exit date.
     - Phase 7 CRUD: journal entries, attachments (BLOB w/ sha256 dedup),
       tags, trade_tags, journal-text search.
 """
@@ -87,7 +86,20 @@ CREATE TABLE IF NOT EXISTS executions (
     qty_left INTEGER NOT NULL,
     commission REAL NOT NULL DEFAULT 0,
     source_file TEXT,
-    import_hash TEXT UNIQUE NOT NULL
+    import_hash TEXT UNIQUE NOT NULL,
+    -- How the user answered a position-flip on this fill, if it ever
+    -- raised one: 'delete_extra' | 'close_to_pnl' | 'leave_open'. Stored
+    -- on the execution (not the trade) because it must survive every
+    -- rebuild — an answered flip must never nag again. Cleared only by
+    -- deleting the row, which is what "clear the trade and re-upload"
+    -- does, deliberately re-opening the question.
+    flip_resolution TEXT,
+    -- 1 = show this fill amber in Manage Executions and include it in the
+    -- "contested only" filter. Set when a flip is answered with
+    -- close_to_pnl / leave_open (the fill is reconciled but not clean),
+    -- or by hand via right-click. delete_extra leaves it 0 — nothing
+    -- ambiguous remains once the extra shares are gone.
+    contested INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_executions_symbol_entered
@@ -120,6 +132,13 @@ CREATE TABLE IF NOT EXISTS trades (
     -- Optional planned-stop price for R-multiple analytics. Null = no
     -- stop recorded for this trade.
     stop_loss_price REAL,
+    -- 1 when the stop was BACK-FILLED by apply_import_time_risk rather
+    -- than planned by the user. Losers get risk = |net_pnl|, which makes
+    -- them exactly -1R by construction — useful as a default, but it
+    -- means the R distribution is circular for those trades. Flagging
+    -- them lets the R report separate real planned stops from inferred
+    -- ones instead of silently mixing the two.
+    stop_is_derived BOOLEAN NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -169,15 +188,6 @@ CREATE TABLE IF NOT EXISTS journal_attachments (
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_sha ON journal_attachments(sha256);
 
-CREATE TABLE IF NOT EXISTS daily_summary (
-    date DATE PRIMARY KEY,
-    gross_pnl REAL NOT NULL DEFAULT 0,
-    net_pnl REAL NOT NULL DEFAULT 0,
-    trade_count INTEGER NOT NULL DEFAULT 0,
-    win_count INTEGER NOT NULL DEFAULT 0,
-    loss_count INTEGER NOT NULL DEFAULT 0,
-    cumulative_pnl REAL NOT NULL DEFAULT 0
-);
 
 -- Hidden trades: keyed by (symbol, entry_time, direction) so hide state
 -- survives rebuild_trades drops. Matches the deterministic-identity tuple
@@ -306,6 +316,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE trades ADD COLUMN realized_pnl REAL")
     if not _column_exists(conn, "trades", "realized_net_pnl"):
         conn.execute("ALTER TABLE trades ADD COLUMN realized_net_pnl REAL")
+    # daily_summary was a pure roll-up of `trades` that nothing ever read —
+    # the calendar and dashboard both recompute from `trades` directly, so
+    # it was rebuilt (full DELETE + re-INSERT of every trading day) on each
+    # import and each trade mutation for no consumer. Dropped rather than
+    # left to go stale; every value in it is derivable from `trades`.
+    conn.execute("DROP TABLE IF EXISTS daily_summary")
+    if not _column_exists(conn, "trades", "stop_is_derived"):
+        conn.execute(
+            "ALTER TABLE trades ADD COLUMN stop_is_derived "
+            "BOOLEAN NOT NULL DEFAULT 0"
+        )
+    # Per-fill flip bookkeeping (see the executions schema above).
+    if not _column_exists(conn, "executions", "flip_resolution"):
+        conn.execute("ALTER TABLE executions ADD COLUMN flip_resolution TEXT")
+    if not _column_exists(conn, "executions", "contested"):
+        conn.execute(
+            "ALTER TABLE executions ADD COLUMN contested "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
     # Per-document thumbnail selection — JSON-encoded list of
     # attachment ids that should appear in the thumbnail strip. NULL /
     # missing / empty list means "no thumbnails", matching the new
@@ -419,7 +448,14 @@ def _fetch_executions_as_dicts(conn: sqlite3.Connection) -> list[dict]:
                filled_price, quantity, filled_canceled_at, qty_filled,
                qty_left, commission, import_hash
         FROM executions
-        WHERE order_status = 'Filled'
+        -- Match tradestation_parser.parse_paste's admission rule, which
+        -- is qty-based rather than status-based: a UROut / Rejected row
+        -- can still carry a real partial fill when the router bailed
+        -- mid-order, and those shares are real money. Filtering on
+        -- order_status here used to drop them after the parser had
+        -- deliberately kept them, stranding the fill in this table and
+        -- leaving a phantom open position that never posted its P&L.
+        WHERE qty_filled > 0 AND filled_price IS NOT NULL
         ORDER BY entered_at, id
         """
     )
@@ -447,7 +483,9 @@ def _fetch_executions_as_dicts(conn: sqlite3.Connection) -> list[dict]:
     return rows
 
 
-def rebuild_trades(conn: sqlite3.Connection) -> tuple[int, list[str]]:
+def rebuild_trades(
+    conn: sqlite3.Connection, *, auto_commit: bool = True,
+) -> tuple[int, list[str]]:
     """Rebuild the trades + trade_executions tables from current executions.
 
     Drops non-manual trades and rebuilds them from `executions`. Manual
@@ -456,6 +494,11 @@ def rebuild_trades(conn: sqlite3.Connection) -> tuple[int, list[str]]:
     (symbol, entry_time, direction) and re-link after rebuild — same
     deterministic identity tuple as `hidden_trades`.
 
+    Set ``auto_commit=False`` when the caller owns the transaction (the
+    import flow does). Committing here unconditionally used to end the
+    import's transaction early, so a later failure couldn't be rolled
+    back even though the UI told the user it had been.
+
     Returns (trade_count, errors).
     """
     executions = _fetch_executions_as_dicts(conn)
@@ -463,7 +506,9 @@ def rebuild_trades(conn: sqlite3.Connection) -> tuple[int, list[str]]:
     # Map import_hash → execution_id for trade_executions linking
     hash_to_id = {ex["import_hash"]: ex["id"] for ex in executions}
 
-    trades, errors = build_trades(executions)
+    # Replay every flip the user has already answered so an addressed
+    # fill never re-raises a warning on a later rebuild.
+    trades, errors = build_trades(executions, fetch_flip_resolutions(conn))
 
     cur = conn.cursor()
 
@@ -494,16 +539,22 @@ def rebuild_trades(conn: sqlite3.Connection) -> tuple[int, list[str]]:
 
     # Phase 12: stop-loss survives rebuild_trades too — same
     # (symbol, entry_time, direction) identity tuple.
-    stop_snapshot: dict[tuple, Optional[float]] = {}
+    stop_snapshot: dict[tuple, tuple[Optional[float], int]] = {}
     for r in cur.execute(
         """
-        SELECT symbol, entry_time, direction, stop_loss_price
+        SELECT symbol, entry_time, direction, stop_loss_price,
+               stop_is_derived
         FROM trades
         WHERE is_manual = 0 AND stop_loss_price IS NOT NULL
         """
     ).fetchall():
         key = (r["symbol"], r["entry_time"], r["direction"])
-        stop_snapshot[key] = r["stop_loss_price"]
+        # Carry the derived flag with the price — restoring the stop but
+        # losing the flag would silently promote a back-filled stop into
+        # a user-planned one on every rebuild.
+        stop_snapshot[key] = (
+            r["stop_loss_price"], int(r["stop_is_derived"] or 0),
+        )
 
     # Delete derived trades (manual trades have no rows in trade_executions
     # but are distinguished by is_manual = 1)
@@ -558,55 +609,17 @@ def rebuild_trades(conn: sqlite3.Connection) -> tuple[int, list[str]]:
                     "INSERT OR IGNORE INTO trade_tags (trade_id, tag_id) VALUES (?, ?)",
                     (trade_id, tag_id),
                 )
-        if key in stop_snapshot and stop_snapshot[key] is not None:
+        if key in stop_snapshot and stop_snapshot[key][0] is not None:
+            stop_price, stop_derived = stop_snapshot[key]
             cur.execute(
-                "UPDATE trades SET stop_loss_price = ? WHERE id = ?",
-                (stop_snapshot[key], trade_id),
+                "UPDATE trades SET stop_loss_price = ?, "
+                "stop_is_derived = ? WHERE id = ?",
+                (stop_price, stop_derived, trade_id),
             )
 
-    conn.commit()
+    if auto_commit:
+        conn.commit()
     return len(trades), errors
-
-
-def rebuild_daily_summary(conn: sqlite3.Connection) -> int:
-    """Rebuild the daily_summary table from closed trades.
-
-    Groups by DATE(exit_time). Running cumulative P&L is computed in a
-    second pass over the aggregated rows.
-    """
-    cur = conn.cursor()
-    cur.execute("DELETE FROM daily_summary")
-    cur.execute(
-        """
-        SELECT DATE(exit_time)                             AS date,
-               COALESCE(SUM(gross_pnl), 0)                 AS gross_pnl,
-               COALESCE(SUM(net_pnl), 0)                   AS net_pnl,
-               COUNT(*)                                    AS trade_count,
-               SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) AS win_count,
-               SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) AS loss_count
-        FROM trades
-        WHERE exit_time IS NOT NULL AND net_pnl IS NOT NULL
-        GROUP BY DATE(exit_time)
-        ORDER BY DATE(exit_time)
-        """
-    )
-    rows = cur.fetchall()
-
-    cumulative = 0.0
-    for r in rows:
-        cumulative += r["net_pnl"] or 0.0
-        cur.execute(
-            """
-            INSERT INTO daily_summary
-                (date, gross_pnl, net_pnl, trade_count,
-                 win_count, loss_count, cumulative_pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (r["date"], r["gross_pnl"], r["net_pnl"], r["trade_count"],
-             r["win_count"], r["loss_count"], cumulative),
-        )
-    conn.commit()
-    return len(rows)
 
 
 # --- display / mutation helpers (Phase 2) -----------------------------------
@@ -725,7 +738,6 @@ def delete_trade(conn: sqlite3.Connection, trade_id: int) -> bool:
     if row["is_manual"]:
         conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
         conn.commit()
-        rebuild_daily_summary(conn)
         return True
 
     exec_ids = [
@@ -742,7 +754,6 @@ def delete_trade(conn: sqlite3.Connection, trade_id: int) -> bool:
         )
     conn.commit()
     rebuild_trades(conn)
-    rebuild_daily_summary(conn)
     return True
 
 
@@ -797,7 +808,6 @@ def delete_trades(
 
     if derived_ids:
         rebuild_trades(conn)
-    rebuild_daily_summary(conn)
     return len(rows)
 
 
@@ -1506,19 +1516,23 @@ def insert_manual_trade(
             symbol, direction, entry_time, exit_time,
             avg_entry_price, avg_exit_price, total_shares,
             total_commission, gross_pnl, net_pnl,
-            hold_duration_seconds, is_open, is_manual, stop_loss_price
+            hold_duration_seconds, is_open, is_manual, stop_loss_price,
+            closed_shares
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
         (
             symbol, direction, entry_time, exit_time,
             avg_entry_price, avg_exit_price, total_shares,
             total_commission, gross, net, hold,
             1 if is_open else 0, stop_loss_price,
+            # Match the derived-trade invariant: a fully closed trade has
+            # every share realized. Left at the schema default of 0, a
+            # closed manual trade contradicted its own total_shares.
+            0 if is_open else int(total_shares),
         ),
     )
     conn.commit()
-    rebuild_daily_summary(conn)
     return int(cur.lastrowid)
 
 
@@ -1560,18 +1574,18 @@ def update_manual_trade(
                avg_entry_price = ?, avg_exit_price = ?, total_shares = ?,
                total_commission = ?, gross_pnl = ?, net_pnl = ?,
                hold_duration_seconds = ?, is_open = ?, stop_loss_price = ?,
-               updated_at = CURRENT_TIMESTAMP
+               closed_shares = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?
         """,
         (
             symbol, direction, entry_time, exit_time,
             avg_entry_price, avg_exit_price, total_shares,
             total_commission, gross, net, hold,
-            1 if is_open else 0, stop_loss_price, trade_id,
+            1 if is_open else 0, stop_loss_price,
+            0 if is_open else int(total_shares), trade_id,
         ),
     )
     conn.commit()
-    rebuild_daily_summary(conn)
     return True
 
 
@@ -1589,9 +1603,13 @@ def set_stop_loss(
     trade_id: int,
     stop_loss_price: Optional[float],
 ) -> None:
-    """Set or clear the planned-stop price on any trade (manual or derived)."""
+    """Set or clear the planned-stop price on any trade (manual or derived).
+
+    Always clears ``stop_is_derived`` — a stop the user set by hand is a
+    real planned stop, even if it happens to overwrite a back-filled one.
+    """
     conn.execute(
-        "UPDATE trades SET stop_loss_price = ?, "
+        "UPDATE trades SET stop_loss_price = ?, stop_is_derived = 0, "
         "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         (stop_loss_price, trade_id),
     )
@@ -1624,6 +1642,7 @@ def apply_import_time_risk(
     hash_to_risk: dict[str, float],
     *,
     default_risk: Optional[float] = None,
+    auto_commit: bool = True,
 ) -> int:
     """Resolve each derived trade's planned risk into a stop-loss price.
 
@@ -1685,6 +1704,10 @@ def apply_import_time_risk(
     ).fetchall():
         tid = int(row["id"])
         resolved: Optional[float] = trade_to_explicit_risk.get(tid)
+        # Rule 1 carries a risk the user actually annotated; rules 2 and 3
+        # are inferred from the outcome (or a blanket default), so the
+        # resulting stop is marked derived.
+        is_derived = resolved is None
 
         if resolved is None:
             net = row["net_pnl"]
@@ -1708,12 +1731,13 @@ def apply_import_time_risk(
         if stop is None:
             continue
         cur.execute(
-            "UPDATE trades SET stop_loss_price = ?, "
+            "UPDATE trades SET stop_loss_price = ?, stop_is_derived = ?, "
             "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (stop, tid),
+            (stop, 1 if is_derived else 0, tid),
         )
         applied += 1
-    conn.commit()
+    if auto_commit:
+        conn.commit()
     return applied
 
 
@@ -1909,7 +1933,7 @@ def soft_delete_trade(
     )
     conn.commit()
     # Delegates to the existing hard-delete path so cascades and
-    # rebuild_trades / rebuild_daily_summary fire correctly.
+    # rebuild_trades fire correctly.
     return delete_trade(conn, trade_id)
 
 
@@ -2149,7 +2173,6 @@ def restore_deleted_trade(
         if row is not None:
             final_id = int(row["id"])
 
-    rebuild_daily_summary(conn)
     return final_id
 
 
@@ -2171,4 +2194,286 @@ def purge_old_deleted_trades(
         (f"-{int(max_age_days)} days",),
     )
     conn.commit()
+    return cur.rowcount
+
+
+# --- Phase 21: direct execution management ---------------------------------
+#
+# Every other delete path in this module reaches executions *through* a
+# trade. Fills the builder couldn't group (an over-sell, a fill with no
+# open position) belong to no trade, so they were unreachable from the UI
+# entirely — even though the builder-warning dialog told the user to "edit
+# them in place or delete them". These three functions back the Manage
+# Executions dialog and close that gap.
+
+
+def fetch_executions_with_links(
+    conn: sqlite3.Connection,
+    *,
+    ungrouped_only: bool = False,
+    contested_only: bool = False,
+    symbol: Optional[str] = None,
+    trade_ids: Optional[list[int]] = None,
+) -> list[dict]:
+    """Executions plus the id of the trade each one was grouped into.
+
+    The view mirrors the Trades tab: deleting a trade deletes its fills,
+    so what's listed here is exactly what backs the trades that exist.
+    Pass ``trade_ids`` to scope to a selection — only fills belonging to
+    those trades come back. An empty list means "no selection", which
+    returns nothing rather than everything.
+
+    ``trade_id`` is None for a fill the builder never placed in a trade.
+    ``ungrouped_only`` narrows to those; ``contested_only`` narrows to
+    fills flagged by a flip resolution or by hand; ``symbol`` filters
+    case-insensitively on the parsed root symbol.
+    """
+    # GROUP BY e.id: a single fill can belong to TWO trades when a flip is
+    # resolved as leave_open (it closes one position and opens the
+    # opposite one), and the raw join would list it twice.
+    sql = """
+        SELECT e.*,
+               MIN(te.trade_id)          AS trade_id,
+               GROUP_CONCAT(te.trade_id) AS trade_ids
+        FROM executions e
+        LEFT JOIN trade_executions te ON te.execution_id = e.id
+    """
+    where: list[str] = []
+    params: list = []
+    if trade_ids is not None:
+        if not trade_ids:
+            return []
+        ph = ",".join("?" * len(trade_ids))
+        where.append(f"te.trade_id IN ({ph})")
+        params.extend(int(t) for t in trade_ids)
+    if ungrouped_only:
+        where.append("te.trade_id IS NULL")
+    if contested_only:
+        where.append("e.contested = 1")
+    if symbol:
+        where.append("UPPER(e.symbol) LIKE ?")
+        params.append(f"%{symbol.strip().upper()}%")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " GROUP BY e.id ORDER BY e.entered_at DESC, e.id DESC"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+# Fields the Manage Executions dialog may rewrite. Everything else on the
+# row is either derived (symbol root, extension) or bookkeeping (id,
+# source_file) and is recomputed / left alone.
+EDITABLE_EXECUTION_FIELDS = frozenset({
+    "entered_at", "type", "raw_symbol", "order_status", "filled_price",
+    "quantity", "filled_canceled_at", "qty_filled", "qty_left",
+    "commission",
+})
+
+
+def update_execution(
+    conn: sqlite3.Connection,
+    execution_id: int,
+    fields: dict,
+    *,
+    auto_commit: bool = True,
+) -> bool:
+    """Rewrite one execution and refresh its dedup hash.
+
+    Re-derives ``symbol`` / ``symbol_extension`` / ``extension_type`` from
+    ``raw_symbol`` and recomputes ``import_hash`` so the row keeps a
+    consistent identity — otherwise a re-paste of the same export would
+    no longer match it and would insert a duplicate.
+
+    Raises ``sqlite3.IntegrityError`` if the edit collides with another
+    execution's hash (i.e. the user made this row identical to one that
+    already exists). Returns False if the id doesn't exist.
+    """
+    from ingest.tradestation_parser import compute_import_hash, parse_symbol
+
+    row = conn.execute(
+        "SELECT * FROM executions WHERE id = ?", (execution_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    merged = dict(row)
+    for k, v in fields.items():
+        if k in EDITABLE_EXECUTION_FIELDS:
+            merged[k] = v
+
+    root, ext, ext_type = parse_symbol(str(merged.get("raw_symbol") or ""))
+    merged["symbol"] = root
+    merged["symbol_extension"] = ext
+    merged["extension_type"] = ext_type
+    merged["import_hash"] = compute_import_hash(merged)
+
+    conn.execute(
+        """
+        UPDATE executions
+           SET entered_at = ?, type = ?, symbol = ?, raw_symbol = ?,
+               symbol_extension = ?, extension_type = ?, order_status = ?,
+               stop_price = ?, limit_price = ?, filled_price = ?,
+               quantity = ?, filled_canceled_at = ?, qty_filled = ?,
+               qty_left = ?, commission = ?, import_hash = ?
+         WHERE id = ?
+        """,
+        (
+            merged["entered_at"], merged["type"], merged["symbol"],
+            merged["raw_symbol"], merged["symbol_extension"],
+            merged["extension_type"], merged["order_status"],
+            merged["stop_price"], merged["limit_price"],
+            merged["filled_price"], merged["quantity"],
+            merged["filled_canceled_at"], merged["qty_filled"],
+            merged["qty_left"], merged["commission"],
+            merged["import_hash"], execution_id,
+        ),
+    )
+    if auto_commit:
+        conn.commit()
+    return True
+
+
+def delete_executions(
+    conn: sqlite3.Connection,
+    execution_ids: list[int],
+    *,
+    auto_commit: bool = True,
+) -> int:
+    """Hard-delete executions by id. Returns the number removed.
+
+    Callers are expected to run ``rebuild_trades`` afterwards — deleting a
+    fill that belonged to a trade changes that trade's shape.
+    """
+    if not execution_ids:
+        return 0
+    ph = ",".join("?" * len(execution_ids))
+    cur = conn.execute(
+        f"DELETE FROM executions WHERE id IN ({ph})", execution_ids,
+    )
+    if auto_commit:
+        conn.commit()
+    return cur.rowcount
+
+
+# --- Phase 22: position-flip resolution ------------------------------------
+#
+# A flip (an exit closing more shares than the position holds) is answered
+# once by the user, per block of shares, in the pre-import dialog. The
+# answer lives on the execution so every later rebuild replays it silently.
+# Clearing the trade and re-uploading deletes the row and its answer,
+# which deliberately re-opens the question.
+
+
+def fetch_flip_resolutions(conn: sqlite3.Connection) -> dict[str, str]:
+    """``import_hash`` → recorded ``RESOLUTION_*`` for answered flips."""
+    return {
+        r["import_hash"]: r["flip_resolution"]
+        for r in conn.execute(
+            "SELECT import_hash, flip_resolution FROM executions "
+            "WHERE flip_resolution IS NOT NULL"
+        ).fetchall()
+    }
+
+
+def detect_flips(
+    conn: sqlite3.Connection,
+    pending: Optional[Iterable[dict]] = None,
+) -> list:
+    """Unanswered flips across stored executions plus ``pending`` ones.
+
+    Run BEFORE inserting an import so the user can resolve each flip
+    up-front — including the option to abort the import entirely. Purely
+    read-only; nothing is written.
+
+    Returns a list of ``trade_builder.FlipInstance``.
+    """
+    from ingest.trade_builder import FlipInstance
+
+    rows = _fetch_executions_as_dicts(conn)
+    if pending:
+        seen = {r["import_hash"] for r in rows}
+        rows = rows + [
+            dict(p) for p in pending if p["import_hash"] not in seen
+        ]
+    _trades, errors = build_trades(rows, fetch_flip_resolutions(conn))
+    return [e for e in errors if isinstance(e, FlipInstance)]
+
+
+def apply_flip_resolution(
+    conn: sqlite3.Connection,
+    import_hash: str,
+    resolution: str,
+    *,
+    keep_shares: Optional[int] = None,
+    auto_commit: bool = True,
+) -> bool:
+    """Record how a flip on ``import_hash`` was answered.
+
+    ``delete_extra`` physically removes the unmatched shares: the fill is
+    trimmed to ``keep_shares`` (the position size it actually closed), or
+    the whole row is deleted when nothing is left. Trimming keeps the row
+    — and therefore its ``import_hash`` — so a later re-import of the same
+    export still dedups and the correction survives.
+
+    ``close_to_pnl`` / ``leave_open`` change no share counts; they mark
+    the fill contested so it stays visible in Manage Executions.
+
+    Returns False when the hash isn't in the table.
+    """
+    from ingest.trade_builder import (
+        RESOLUTION_DELETE_EXTRA, VALID_RESOLUTIONS,
+    )
+
+    if resolution not in VALID_RESOLUTIONS:
+        raise ValueError(f"unknown flip resolution: {resolution!r}")
+
+    row = conn.execute(
+        "SELECT id, qty_filled FROM executions WHERE import_hash = ?",
+        (import_hash,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    if resolution == RESOLUTION_DELETE_EXTRA:
+        keep = max(0, int(keep_shares if keep_shares is not None else 0))
+        if keep <= 0:
+            conn.execute("DELETE FROM executions WHERE id = ?", (row["id"],))
+        else:
+            conn.execute(
+                "UPDATE executions SET qty_filled = ?, qty_left = 0, "
+                "flip_resolution = ?, contested = 0 WHERE id = ?",
+                (keep, resolution, row["id"]),
+            )
+    else:
+        conn.execute(
+            "UPDATE executions SET flip_resolution = ?, contested = 1 "
+            "WHERE id = ?",
+            (resolution, row["id"]),
+        )
+    if auto_commit:
+        conn.commit()
+    return True
+
+
+def set_execution_contested(
+    conn: sqlite3.Connection,
+    execution_ids: list[int],
+    contested: bool,
+    *,
+    auto_commit: bool = True,
+) -> int:
+    """Flag / unflag fills for the amber highlight + contested filter.
+
+    Marking a fill *uncontested* only clears the highlight — it leaves
+    ``flip_resolution`` intact, so a flip the user has already answered
+    stays answered and won't start warning again.
+    """
+    if not execution_ids:
+        return 0
+    ph = ",".join("?" * len(execution_ids))
+    cur = conn.execute(
+        f"UPDATE executions SET contested = ? WHERE id IN ({ph})",
+        [1 if contested else 0, *execution_ids],
+    )
+    if auto_commit:
+        conn.commit()
     return cur.rowcount

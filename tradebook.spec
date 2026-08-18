@@ -120,4 +120,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(PROJECT_DIR / "tradebook.ico"),
+    # Stamps Properties → Details with the version from config.APP_VERSION.
+    version=str(PROJECT_DIR / "version_info.txt"),
 )

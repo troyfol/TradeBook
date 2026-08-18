@@ -15,7 +15,7 @@ from PySide6.QtCore import QLockFile, QSettings, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from config import (
-    AUTO_BACKUPS_DIR, DATA_DIR, DB_PATH, RESOURCE_ROOT,
+    APP_VERSION, AUTO_BACKUPS_DIR, DATA_DIR, DB_PATH, RESOURCE_ROOT,
     ensure_user_dirs, migrate_loose_backups_to_manual, purge_temp_dir,
 )
 from ingest import backups, db_manager
@@ -67,6 +67,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setOrganizationName("TradeBook")
     app.setApplicationName("TradeBook")
+    app.setApplicationVersion(APP_VERSION)
 
     # Bind chart palette to settings BEFORE stylesheet load so derived
     # tones use the user's customized colors on first paint.

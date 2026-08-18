@@ -72,6 +72,15 @@ _PARAGRAPH_TAGS = {"p", "div"}
 _LIST_ITEM_TAGS = {"li"}
 # Tags to discard entirely along with their contents.
 _SKIP_TAGS = {"script", "style", "head", "title"}
+# Void elements never emit an end tag. Counting them while unwinding a
+# skipped region would leave ``_skip_depth`` permanently above zero and
+# silently swallow the rest of the document — a bare `<meta charset>`
+# inside <head> was enough to export an empty file. (Qt self-closes its
+# tags, which routes them through ``handle_startendtag`` and hid this.)
+_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
 
 
 class _HtmlToBlocks(HTMLParser):
@@ -115,7 +124,8 @@ class _HtmlToBlocks(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs) -> None:
         if self._skip_depth:
-            self._skip_depth += 1
+            if tag not in _VOID_TAGS:
+                self._skip_depth += 1
             return
         if tag in _SKIP_TAGS:
             self._skip_depth = 1

@@ -24,6 +24,9 @@ from typing import Any, Optional
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
+from config import (
+    TYPE_BUY, TYPE_SELL, TYPE_SELL_SHORT, TYPE_BUY_TO_COVER,
+)
 from ingest.tradestation_parser import compute_import_hash
 
 STATE_NEW = "new"
@@ -192,8 +195,13 @@ class PreviewTableModel(QAbstractTableModel):
             ex["extension_type"] = ext_type
         elif key == "qty_filled":
             ex["qty_filled"] = int(parsed or 0)
-            # Keep the parent ``quantity`` aligned — dedup hashes
-            # on `quantity` and the two are otherwise independent.
+            # ``quantity`` is the ORDER size and stays put — on a partial
+            # fill the two legitimately differ. The dedup hash is built
+            # from `quantity`, which means it identifies the *order*, not
+            # the edited values: deliberate, so re-pasting the same export
+            # still marks the row DUP and preserves this edit rather than
+            # re-importing the broker's original figure. Only backfill it
+            # when the row never had one (hand-built / synthetic rows).
             if ex.get("quantity") is None:
                 ex["quantity"] = int(parsed or 0)
         else:
@@ -300,6 +308,17 @@ class PreviewTableModel(QAbstractTableModel):
                 return int(float(s))
             except ValueError:
                 return _INVALID
+        if key == "type":
+            # Only the four types the trade builder understands. A typo
+            # here ("Sel") used to import cleanly and then fail the build
+            # with "has no open position" — after the row was no longer
+            # editable. Case-insensitive so "sell short" works.
+            for canon in (
+                TYPE_BUY, TYPE_SELL, TYPE_SELL_SHORT, TYPE_BUY_TO_COVER,
+            ):
+                if s.casefold() == canon.casefold():
+                    return canon
+            return _INVALID
         return s
 
 

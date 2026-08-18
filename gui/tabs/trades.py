@@ -153,6 +153,14 @@ class TradesTab(QWidget):
         )
         self.btn_apply_risk.clicked.connect(self._on_apply_risk_to_selected)
 
+        self.btn_executions = QPushButton("Manage executions…", self)
+        self.btn_executions.setToolTip(
+            "View, edit, or delete the raw fills behind these trades — "
+            "including fills the trade builder couldn't group into any "
+            "trade, which are unreachable from anywhere else."
+        )
+        self.btn_executions.clicked.connect(self._on_manage_executions)
+
         self.btn_delete_all = QPushButton("Delete all visible", self)
         self.btn_delete_all.setToolTip(
             "Delete every trade currently shown in the table "
@@ -170,6 +178,7 @@ class TradesTab(QWidget):
         toolbar_row.addWidget(self.btn_apply_risk)
         toolbar_row.addSpacing(12)
         toolbar_row.addWidget(self.btn_new_manual)
+        toolbar_row.addWidget(self.btn_executions)
         toolbar_row.addWidget(self.btn_delete_all)
 
         # Reports-style filter bar. Defaults to "All" so the Trades tab
@@ -415,6 +424,27 @@ class TradesTab(QWidget):
         self.refresh()
 
     # ---- manual trade entry ----------------------------------------------
+
+    def _on_manage_executions(self) -> None:
+        """Open the raw-executions editor; refresh if it changed anything.
+
+        With rows selected, the editor is scoped to just those trades'
+        fills — the manager should reflect what's in the trade section,
+        not an unrelated wall of executions. With nothing selected it
+        shows everything.
+        """
+        from gui.dialogs.executions import ExecutionsDialog
+
+        selected = [
+            int(r["id"]) for r in self._selected_rows()
+            if r.get("id") is not None
+        ]
+        dlg = ExecutionsDialog(
+            self._get_conn, self, trade_ids=selected or None,
+        )
+        dlg.exec()
+        if dlg.mutated:
+            self.refresh()
 
     def _on_new_manual_trade(self) -> None:
         dlg = ManualTradeDialog(parent=self)

@@ -11,7 +11,7 @@ What it does:
        Briefs tab.
 
 Touches nothing else: trades, executions, journal entries, tags,
-attachments, hidden_trades, daily_summary, deleted_trades, strategies,
+attachments, hidden_trades, deleted_trades, strategies,
 and QSettings (registry on Windows) are all left exactly as they were.
 """
 from __future__ import annotations

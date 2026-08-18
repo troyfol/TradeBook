@@ -157,7 +157,9 @@ class OpenPositionsCard(QFrame):
 
         self._last_positions = rows
         self._count_value.setText(str(len(rows)))
-        self._count_label.setText("open" if len(rows) == 1 else "open")
+        self._count_label.setText(
+            "position open" if len(rows) == 1 else "positions open"
+        )
         self._cap_value.setText(_fmt_currency_compact(total_capital))
         self._rerender_rows()
 

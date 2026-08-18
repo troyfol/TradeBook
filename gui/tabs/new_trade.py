@@ -8,8 +8,8 @@ Workflow:
     3. Preview table renders with row background colors (green/gray/red).
        Tooltip on a DUP row shows the matching existing execution; tooltip
        on an ERROR row shows the parse error + raw line.
-    4. User clicks Import → new executions inserted, trades / daily summary
-       rebuilt, `import_completed` signal emitted (MainWindow switches to
+    4. User clicks Import → new executions inserted, trades rebuilt,
+       `import_completed` signal emitted (MainWindow switches to
        Trades tab and refreshes).
 
 Non-filled orders (Rejected, Canceled, etc.) are silently filtered at parse
@@ -280,6 +280,30 @@ class NewTradeTab(QWidget):
 
         conn = self._get_conn()
 
+        # ---- resolve position flips BEFORE writing anything --------------
+        # detect_flips is read-only and runs over the stored fills plus the
+        # pending batch, so the user answers each unmatched block of shares
+        # up front — including "stop, let me re-upload", which must leave
+        # the DB completely untouched.
+        try:
+            flips = db_manager.detect_flips(conn, new_execs)
+        except Exception:
+            flips = []
+        flip_answers: dict[str, str] = {}
+        if flips:
+            from gui.dialogs.flip_resolution import resolve_flips
+
+            answers = resolve_flips(flips, self)
+            if answers is None:
+                QMessageBox.information(
+                    self,
+                    "Import stopped",
+                    "Nothing was imported. Fix the export and paste again "
+                    "— the database is unchanged.",
+                )
+                return
+            flip_answers = answers
+
         # Pre-import safety snapshot. Failure here is non-fatal — we warn
         # but still let the user proceed (they can always undo via the
         # most recent prior backup).
@@ -299,15 +323,31 @@ class NewTradeTab(QWidget):
             inserted, _skipped = db_manager.insert_executions(
                 conn, new_execs, auto_commit=False,
             )
-            _n_trades, builder_errors = db_manager.rebuild_trades(conn)
-            # Resolve planned risk into stop-loss prices BEFORE the
-            # daily-summary rebuild — keeps the whole import atomic.
+            # Record each flip answer onto its execution before the
+            # rebuild, so this rebuild — and every future one — replays it
+            # instead of re-raising the warning.
+            for _hash, _mode in flip_answers.items():
+                _flip = next(
+                    (f for f in flips if f.import_hash == _hash), None,
+                )
+                db_manager.apply_flip_resolution(
+                    conn, _hash, _mode,
+                    keep_shares=_flip.position_shares if _flip else None,
+                    auto_commit=False,
+                )
+            # Every step runs with auto_commit=False so the whole import
+            # is one transaction and the rollback below can actually undo
+            # it. These helpers used to commit internally, which ended the
+            # transaction early — a failure here left executions and
+            # trades durably written while the dialog claimed otherwise.
+            _n_trades, builder_errors = db_manager.rebuild_trades(
+                conn, auto_commit=False,
+            )
             # Losers auto-fill to risk = |net_pnl| (clean -1R);
             # winners fall back to ``default_risk`` if one's set.
             db_manager.apply_import_time_risk(
-                conn, {}, default_risk=default_risk,
+                conn, {}, default_risk=default_risk, auto_commit=False,
             )
-            db_manager.rebuild_daily_summary(conn)
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -333,13 +373,16 @@ class NewTradeTab(QWidget):
             QMessageBox.warning(
                 self,
                 "Trade builder warnings",
-                "The import completed, but the trade builder couldn't "
-                "group some fills into a trade (prior trades for those "
-                "symbols were kept intact):\n\n"
+                "The import completed, but some fills didn't group "
+                "cleanly. Everything that could be matched was still "
+                "built into trades — including the shares actually held "
+                "at the time — and prior trades for these symbols were "
+                "kept intact:\n\n"
                 f"{preview}{more}\n\n"
-                "These fills are still in the executions table — you "
-                "can edit them in place or delete them, then re-run an "
-                "import to rebuild.",
+                "Any unmatched shares usually mean the export is missing "
+                "fills. The executions are all still in the executions "
+                "table — you can edit them in place or delete them, then "
+                "re-run an import to rebuild.",
             )
 
         self._on_clear()

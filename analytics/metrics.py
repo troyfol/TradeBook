@@ -263,11 +263,14 @@ def _fmt_ratio(v: Optional[float]) -> str:
 
 
 def _color_ratio(v: Optional[float]) -> Optional[str]:
-    """Green when positive (incl. ∞), red when negative, neutral at 0."""
+    """Green when positive (incl. +∞), red when negative (incl. -∞),
+    neutral at 0. Both ratios can only reach +∞ today, but keying the
+    color off the sign rather than off isinf() keeps that an assumption
+    the formatter doesn't depend on."""
     if v is None:
         return None
     if math.isinf(v):
-        return "#00C853"
+        return "#00C853" if v > 0 else "#FF1744"
     return _color_pnl(v)
 
 
